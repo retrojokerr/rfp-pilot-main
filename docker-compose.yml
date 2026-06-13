@@ -1,0 +1,40 @@
+name: rfp-pilot
+
+services:
+  backend:
+    image: ghcr.io/retrojokerr/rfp-pilot-backend:latest
+    restart: unless-stopped
+    env_file:
+      - ./rfp-backend/.env
+    environment:
+      FEEDBACK_LOG: /data/feedback_log.jsonl
+      HF_HOME: /models
+    volumes:
+      - hf_models:/models
+      - feedback_data:/data
+      - ./rfp-backend/users.json:/app/users.json
+      - ./rfp-backend/history.json:/app/history.json
+      - ./rfp-backend/credentials.json:/app/credentials.json
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+
+  frontend:
+    image: ghcr.io/retrojokerr/rfp-pilot-frontend:latest
+    restart: unless-stopped
+    env_file:
+      - ./rfp-frontend/.env
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+
+volumes:
+  hf_models:
+  feedback_data:
