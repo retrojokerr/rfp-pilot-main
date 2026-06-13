@@ -1,0 +1,28 @@
+# Secrets
+.env
+credentials.json
+drive_state.json
+
+# User data / PII
+users.json
+history.json
+feedback_log.jsonl
+
+# Vector DB
+qdrant_storage/
+*.snapshot
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+get-pip.py
+
+# Logs
+*.log
+bot.log
+
+# Documents cache
+documents/

@@ -1,0 +1,14 @@
+version: "3.9"
+
+services:
+  bot:
+    build: .
+    container_name: rfi-bot
+    restart: always
+    env_file: .env
+    volumes:
+      - qdrant_data:/app/qdrant_storage
+      - ./credentials.json:/app/credentials.json
+
+volumes:
+  qdrant_data:

@@ -1,0 +1,269 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ════════════════════════════════════════════════════════════
+   DESIGN TOKENS — Direction A: dense, keyboard-first, monochrome
+   neutrals with a single indigo accent, crisp 1px borders,
+   120–160ms transitions. Every color used in the app must come
+   from these variables (or the semantic Tailwind aliases that
+   point at them) — never raw palette classes.
+   ════════════════════════════════════════════════════════════ */
+
+@layer base {
+  :root {
+    /* Neutrals — near-monochrome zinc */
+    --background: 0 0% 100%;
+    --foreground: 240 10% 9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 9%;
+    --secondary: 240 5% 96%;
+    --secondary-foreground: 240 6% 10%;
+    --muted: 240 5% 96%;
+    --muted-foreground: 240 4% 42%;
+    --accent: 240 5% 95%;
+    --accent-foreground: 240 6% 10%;
+    --border: 240 6% 88%;
+    --input: 240 6% 88%;
+    --sidebar-bg: 240 5% 97.5%;
+
+    /* Single brand accent */
+    --primary: 239 78% 60%;
+    --primary-foreground: 0 0% 100%;
+    --ring: 239 78% 60%;
+
+    /* Semantic status — the ONLY source of status color app-wide.
+       Yes/approved = success · Partial/needs-review = warning ·
+       No/rejected/error = danger · exported/info = info ·
+       Unknown/draft = neutral (muted). Each has fg / bg / border. */
+    --success: 152 60% 32%;
+    --success-bg: 150 60% 96%;
+    --success-border: 150 45% 82%;
+    --warning: 35 85% 32%;
+    --warning-bg: 45 90% 95%;
+    --warning-border: 42 75% 78%;
+    --danger: 0 70% 44%;
+    --danger-bg: 0 80% 97%;
+    --danger-border: 0 65% 86%;
+    --info: 217 80% 42%;
+    --info-bg: 215 90% 96.5%;
+    --info-border: 214 70% 84%;
+
+    --destructive: 0 70% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 240 7% 5.5%;
+    --foreground: 240 8% 95%;
+    --card: 240 6% 7.5%;
+    --card-foreground: 240 8% 95%;
+    --popover: 240 6% 7.5%;
+    --popover-foreground: 240 8% 95%;
+    --secondary: 240 5% 13%;
+    --secondary-foreground: 240 8% 95%;
+    --muted: 240 5% 11%;
+    --muted-foreground: 240 5% 62%;
+    --accent: 240 5% 13.5%;
+    --accent-foreground: 240 8% 95%;
+    --border: 240 5% 16%;
+    --input: 240 5% 16%;
+    --sidebar-bg: 240 7% 4%;
+
+    --primary: 239 80% 67%;
+    --primary-foreground: 0 0% 100%;
+    --ring: 239 80% 67%;
+
+    --success: 150 55% 58%;
+    --success-bg: 152 45% 10%;
+    --success-border: 151 40% 22%;
+    --warning: 42 85% 60%;
+    --warning-bg: 40 60% 10%;
+    --warning-border: 40 55% 24%;
+    --danger: 0 75% 64%;
+    --danger-bg: 0 50% 11%;
+    --danger-border: 0 45% 25%;
+    --info: 215 85% 66%;
+    --info-bg: 217 55% 11%;
+    --info-border: 216 50% 26%;
+
+    --destructive: 0 65% 56%;
+    --destructive-foreground: 0 0% 100%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+
+  /* Keyboard-first: a visible, consistent focus ring on EVERY
+     interactive element, in both themes. Never remove this. */
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  /* Inputs/areas handle their own ring via .field */
+  input:focus-visible, textarea:focus-visible, select:focus-visible {
+    outline: none;
+  }
+
+  /* Respect users who turn motion off */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { @apply bg-border rounded-full; }
+  ::-webkit-scrollbar-thumb:hover { @apply bg-muted-foreground/40; }
+
+  /* Selection */
+  ::selection { @apply bg-primary/20 text-foreground; }
+}
+
+/* ════════════════════════════════════════════════════════════
+   COMPONENT PRIMITIVES — use these instead of restyling buttons,
+   badges, fields, and panels by hand in every file.
+   ════════════════════════════════════════════════════════════ */
+
+@layer components {
+  /* ── Buttons ───────────────────────────────────────────────
+     All buttons are ≥36px tall (a11y hit target) with crisp 1px
+     borders and 150ms transitions. Visual density comes from
+     compact type + padding, not from shrinking the hit area. */
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 h-9 px-3.5
+           rounded-md text-sm font-medium select-none whitespace-nowrap
+           border transition-colors duration-150
+           disabled:opacity-50 disabled:pointer-events-none;
+  }
+  .btn-primary {
+    @apply btn bg-primary text-primary-foreground border-transparent
+           hover:bg-primary/90 active:bg-primary/95
+           shadow-[0_1px_2px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,0.12)];
+  }
+  .btn-outline {
+    @apply btn bg-card text-foreground border-border
+           hover:bg-accent hover:border-muted-foreground/30;
+  }
+  .btn-ghost {
+    @apply btn bg-transparent text-muted-foreground border-transparent
+           hover:text-foreground hover:bg-accent;
+  }
+  .btn-danger-outline {
+    @apply btn bg-card border-[hsl(var(--danger-border))]
+           text-[hsl(var(--danger))]
+           hover:bg-[hsl(var(--danger-bg))];
+  }
+
+  /* Icon-only button — 36×36px hit target, always pair with aria-label */
+  .icon-btn {
+    @apply inline-flex items-center justify-center h-9 w-9 rounded-md
+           text-muted-foreground border border-transparent
+           transition-colors duration-150
+           hover:text-foreground hover:bg-accent
+           disabled:opacity-50 disabled:pointer-events-none;
+  }
+  /* Compact variant for dense table/list rows — still 32px minimum,
+     used only inside rows where a 36px button breaks line rhythm */
+  .icon-btn-sm {
+    @apply inline-flex items-center justify-center h-8 w-8 rounded-md
+           text-muted-foreground border border-transparent
+           transition-colors duration-150
+           hover:text-foreground hover:bg-accent
+           disabled:opacity-50 disabled:pointer-events-none;
+  }
+
+  /* ── Badges ── status chips; color comes from semantic tokens only */
+  .badge {
+    @apply inline-flex items-center gap-1 h-[18px] px-1.5 rounded
+           text-2xs font-semibold border leading-none whitespace-nowrap;
+  }
+  .badge-success { @apply badge text-[hsl(var(--success))] bg-[hsl(var(--success-bg))] border-[hsl(var(--success-border))]; }
+  .badge-warning { @apply badge text-[hsl(var(--warning))] bg-[hsl(var(--warning-bg))] border-[hsl(var(--warning-border))]; }
+  .badge-danger  { @apply badge text-[hsl(var(--danger))]  bg-[hsl(var(--danger-bg))]  border-[hsl(var(--danger-border))]; }
+  .badge-info    { @apply badge text-[hsl(var(--info))]    bg-[hsl(var(--info-bg))]    border-[hsl(var(--info-border))]; }
+  .badge-neutral { @apply badge text-muted-foreground bg-muted border-border; }
+
+  /* ── Panels & list rows (Linear-style single-border lists) ── */
+  .panel {
+    @apply bg-card border border-border rounded-lg
+           shadow-[0_1px_2px_rgba(0,0,0,0.04)];
+  }
+  .list-row {
+    @apply transition-colors duration-150 hover:bg-accent/50;
+  }
+
+  /* ── Form field ── */
+  .field {
+    @apply w-full h-9 px-3 text-sm bg-card border border-border rounded-md
+           transition-colors duration-150 placeholder:text-muted-foreground/60
+           focus:border-[hsl(var(--ring))] focus:ring-2 focus:ring-[hsl(var(--ring))]/25;
+  }
+  .field-area {
+    @apply w-full px-3 py-2.5 text-sm bg-card border border-border rounded-md
+           transition-colors duration-150 placeholder:text-muted-foreground/60 resize-none
+           focus:border-[hsl(var(--ring))] focus:ring-2 focus:ring-[hsl(var(--ring))]/25;
+  }
+
+  /* Shimmer loading — USE this for list/table skeletons */
+  .shimmer {
+    background: linear-gradient(
+      90deg,
+      hsl(var(--muted)) 25%,
+      hsl(var(--muted-foreground) / 0.12) 50%,
+      hsl(var(--muted)) 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    @apply rounded;
+  }
+
+  /* Confidence bar fills (legacy class names kept for other pages) */
+  .conf-bar-high   { background: hsl(var(--success)); }
+  .conf-bar-medium { background: hsl(var(--warning)); }
+  .conf-bar-low    { background: hsl(var(--danger)); }
+
+  /* Sidebar item (restyled during AppLayout pass; classes kept stable) */
+  .sidebar-item {
+    @apply flex items-center gap-3 px-3 h-9 rounded-md text-sm font-medium
+           text-muted-foreground hover:text-foreground hover:bg-accent
+           transition-colors duration-150 cursor-pointer;
+  }
+  .sidebar-item.active {
+    @apply text-foreground bg-accent;
+    box-shadow: inset 2px 0 0 hsl(var(--primary));
+  }
+
+  /* Step connector */
+  .step-line { @apply flex-1 h-px bg-border; }
+  .step-line.completed { @apply bg-primary; }
+}
+
+@layer utilities {
+  .text-balance { text-wrap: balance; }
+
+  /* Hide scrollbar but keep scroll */
+  .scrollbar-none {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar { display: none; }
+
+  /* Tabular figures for counters/percentages so they don't jitter */
+  .tnum { font-variant-numeric: tabular-nums; }
+}
