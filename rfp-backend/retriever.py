@@ -230,13 +230,8 @@ def generate_answer(question: str, chunks: list[dict], max_retries: int = 3) -> 
     last_err = None
     for attempt in range(max_retries):
         try:
-            response = groq_client.chat.completions.create(
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
-                messages=messages,
-                temperature=0.1,
-                max_tokens=600,
-            )
-            return response.choices[0].message.content.strip()
+            from llm_provider import chat_completion
+            return chat_completion(messages)
         except Exception as e:
             last_err = e
             err_str = str(e)

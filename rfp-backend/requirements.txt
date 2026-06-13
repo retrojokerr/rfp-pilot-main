@@ -85,3 +85,5 @@ urllib3==2.7.0
 uvicorn==0.44.0
 PyJWT==2.13.0
 slowapi
+anthropic
+openai
