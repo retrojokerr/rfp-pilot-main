@@ -11,13 +11,10 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   ],
 
   callbacks: {
-    async signIn({ profile }) {
-      // Only allow @matters.ai emails
-      const email = profile?.email ?? ''
-      if (!email.endsWith('@matters.ai')) {
-        return false  // Reject — redirects to /auth/error?error=AccessDenied
-      }
-      return true
+    async signIn({ user, profile }) {
+      // Only allow @matters.ai accounts
+      const email = (user?.email || profile?.email || '').toLowerCase()
+      return email.endsWith('@matters.ai')
     },
 
     async session({ session, token }) {
