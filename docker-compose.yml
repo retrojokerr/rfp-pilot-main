@@ -4,17 +4,27 @@ services:
   backend:
     image: ghcr.io/retrojokerr/rfp-pilot-backend:latest
     restart: unless-stopped
-    env_file:
-      - ./rfp-backend/.env
+    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      FEEDBACK_LOG: /data/feedback_log.jsonl
-      HF_HOME: /models
+      - LLM_PROVIDER
+      - LLM_MODEL
+      - LLM_API_KEY
+      - GROQ_API_KEY
+      - QDRANT_URL
+      - QDRANT_API_KEY
+      - API_JWT_SECRET
+      - ADMIN_EMAILS
+      - DEFAULT_ROLE
+      - ALLOWED_ORIGINS
+      - DRIVE_FOLDER_ID
+      - GOOGLE_CREDENTIALS_B64
+      - FEEDBACK_LOG=/data/feedback_log.jsonl
+      - HF_HOME=/models
     volumes:
       - hf_models:/models
       - feedback_data:/data
       - ./rfp-backend/users.json:/app/users.json
       - ./rfp-backend/history.json:/app/history.json
-      - ./rfp-backend/credentials.json:/app/credentials.json
     ports:
       - "8000:8000"
     healthcheck:
@@ -24,14 +34,39 @@ services:
       retries: 10
       start_period: 120s
 
+  slack-bot:
+    image: ghcr.io/retrojokerr/rfp-pilot-backend:latest   # same image
+    restart: unless-stopped
+    command: ["python3", "bot.py"]
+    environment:
+      - LLM_PROVIDER
+      - LLM_MODEL
+      - LLM_API_KEY
+      - GROQ_API_KEY
+      - QDRANT_URL
+      - QDRANT_API_KEY
+      - SLACK_BOT_TOKEN
+      - SLACK_APP_TOKEN
+      - FEEDBACK_LOG=/data/feedback_log.jsonl
+      - HF_HOME=/models
+    volumes:
+      - hf_models:/models          # shares the model cache (no double download)
+      - feedback_data:/data        # shares the feedback log with the API
+    depends_on:
+      - backend
+
   frontend:
     image: ghcr.io/retrojokerr/rfp-pilot-frontend:latest
     restart: unless-stopped
-    env_file:
-      - ./rfp-frontend/.env
+    environment:
+      - NEXTAUTH_SECRET
+      - NEXTAUTH_URL
+      - GOOGLE_CLIENT_ID
+      - GOOGLE_CLIENT_SECRET
+      - NEXT_PUBLIC_API_URL
+      - API_JWT_SECRET
     depends_on:
-      backend:
-        condition: service_healthy
+      - backend
     ports:
       - "3000:3000"
 
