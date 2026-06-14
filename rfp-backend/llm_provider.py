@@ -36,11 +36,13 @@ class LLMConfig:
     """Resolved once at import; reflects the current env."""
     def __init__(self):
         # Back-compat: old deployments only set GROQ_API_KEY
-        self.provider = os.getenv("LLM_PROVIDER", "groq").lower().strip()
-        self.model = os.getenv("LLM_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+        # `or default` catches BOTH unset (None) and empty-string ("") values,
+        # so a blank secret in the secrets manager still falls back correctly.
+        self.provider = (os.getenv("LLM_PROVIDER") or "groq").lower().strip()
+        self.model = (os.getenv("LLM_MODEL") or "meta-llama/llama-4-scout-17b-16e-instruct").strip()
         self.api_key = os.getenv("LLM_API_KEY") or os.getenv("GROQ_API_KEY")
-        self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.1"))
-        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "600"))
+        self.temperature = float(os.getenv("LLM_TEMPERATURE") or "0.1")
+        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS") or "600")
 
     def masked_key(self) -> str:
         if not self.api_key:
