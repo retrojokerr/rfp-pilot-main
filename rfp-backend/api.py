@@ -194,6 +194,61 @@ def delete_history(entry_id: str, user: User = Depends(current_user)):
     return {"deleted": entry_id}
 
 
+# ── Review queue: server-side persistence (M4) ───────────────
+REVIEW_FILE = Path(os.getenv("REVIEW_FILE", str(Path(os.getenv("FEEDBACK_LOG", str(Path(__file__).parent / "feedback_log.jsonl"))).parent / "review_queue.json")))
+_review_lock = threading.Lock()
+
+
+def _load_review() -> list[dict]:
+    if REVIEW_FILE.exists():
+        try:
+            return json.loads(REVIEW_FILE.read_text())
+        except Exception:
+            return []
+    return []
+
+
+def _save_review(items: list[dict]) -> None:
+    REVIEW_FILE.parent.mkdir(parents=True, exist_ok=True)
+    REVIEW_FILE.write_text(json.dumps(items, indent=2))
+    try: REVIEW_FILE.chmod(0o600)
+    except OSError: pass
+
+
+@app.get("/review-queue", dependencies=[Depends(require("kb_read"))])
+def get_review_queue():
+    return {"responses": _load_review()}
+
+
+@app.put("/review-queue")
+def put_review_queue(payload: dict, user: User = Depends(require("generate"))):
+    responses = payload.get("responses")
+    if not isinstance(responses, list):
+        raise HTTPException(400, "responses must be a list")
+    with _review_lock:
+        _save_review(responses[-2000:])
+    return {"saved": len(responses[-2000:])}
+
+
+@app.get("/stats", dependencies=[Depends(require("kb_read"))])
+def get_stats():
+    items = _load_review()
+    def _count(status): return sum(1 for r in items if r.get("status") == status)
+    scores = [r.get("confidence", {}).get("score", 0) for r in items
+              if r.get("status") not in ("generating", "error")]
+    scores = [s for s in scores if s]
+    return {
+        "total":         len(items),
+        "generated":     _count("generated"),
+        "needsReview":   _count("needs_review"),
+        "approved":      _count("approved"),
+        "rejected":      _count("rejected"),
+        "exported":      _count("exported"),
+        "lowConfidence": sum(1 for r in items if (r.get("confidence", {}).get("score", 0) or 0) < 0.7),
+        "avgConfidence": (sum(scores) / len(scores)) if scores else 0,
+    }
+
+
 # ── Knowledge base: Drive sync ───────────────────────────────
 
 SYNC_STATE = {"running": False, "last_started": None}

@@ -276,3 +276,18 @@ export async function ingestCorrection(params: {
 }): Promise<void> {
   await api.post('/feedback/ingest', params)
 }
+
+// ── Review queue (server-side persistence, M4) ───────────────
+export async function fetchReviewQueue(): Promise<unknown[]> {
+  const { data } = await api.get('/review-queue')
+  return data.responses ?? []
+}
+
+export async function saveReviewQueue(responses: unknown[]): Promise<void> {
+  await api.put('/review-queue', { responses })
+}
+
+export async function fetchStats(): Promise<Record<string, number>> {
+  const { data } = await api.get('/stats')
+  return data
+}

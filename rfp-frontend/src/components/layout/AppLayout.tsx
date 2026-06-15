@@ -71,6 +71,14 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     setReviewActor(session?.user?.name)
   }, [session?.user?.name])
 
+  // M4: re-hydrate the review store from the backend once signed in (the
+  // initial hydrate runs before the auth token exists).
+  useEffect(() => {
+    if (session?.user) {
+      useReviewStore.persist?.rehydrate?.()
+    }
+  }, [session?.user])
+
   useEffect(() => { setMounted(true) }, [])
 
   return (

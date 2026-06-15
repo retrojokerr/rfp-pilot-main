@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { ingestCorrection } from '@/services/api'
 import { persist } from 'zustand/middleware'
 import type { FeedbackPair, FeedbackSignal, FeedbackSource, KnowledgeGap, AvailabilityLabel } from '@/types'
 
@@ -67,6 +68,17 @@ export const useFeedbackStore = create<FeedbackStore>()(
           notes,
         }
         set((s) => ({ pairs: [pair, ...s.pairs] }))
+
+        // M4: push to the shared server log so Workspace/Assistant corrections
+        // land in feedback_log.jsonl alongside Slack ones.
+        if (goodAnswer && goodAnswer.trim()) {
+          ingestCorrection({
+            question,
+            good_answer: goodAnswer,
+            section: section || '',
+            source: source || 'workspace',
+          }).catch(() => { /* local copy retained */ })
+        }
 
         // Auto-detect knowledge gaps: low confidence + negative signal
         if (confidence < 0.7 && (signal === 'thumbs_down' || signal === 'rejected')) {

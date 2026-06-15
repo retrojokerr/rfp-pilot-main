@@ -1,8 +1,8 @@
 import { create } from 'zustand'
-import { persist, createJSONStorage } from 'zustand/middleware'
+import { persist } from 'zustand/middleware'
 import { useFeedbackStore } from '@/stores/feedbackStore'
 import { useWizardStore } from '@/stores/wizardStore'
-import { ingestCorrection } from '@/services/api'
+import { ingestCorrection, fetchReviewQueue, saveReviewQueue } from '@/services/api'
 import type {
   GeneratedResponse,
   ResponseStatus,
@@ -12,6 +12,7 @@ import type {
 } from '@/types'
 
 function makeId() { return Math.random().toString(36).slice(2, 10) }
+let _saveTimer: ReturnType<typeof setTimeout> | null = null
 function now() { return new Date().toISOString() }
 
 // ── Actor ─────────────────────────────────────────────────────
@@ -328,8 +329,30 @@ export const useReviewStore = create<ReviewStore>()(
     }),
     {
       name: 'rfp-review-store',
-      storage: createJSONStorage(() => localStorage),
+      // M4: server-backed persistence. Store logic unchanged; only the
+      // persistence layer moved from localStorage to the backend.
+      storage: {
+        getItem: async (_name: string) => {
+          try {
+            const responses = await fetchReviewQueue()
+            return { state: { responses }, version: 2 }
+          } catch {
+            return null
+          }
+        },
+        setItem: (_name: string, value: { state: { responses: unknown[] } }) => {
+          const responses = value?.state?.responses ?? []
+          if (_saveTimer) clearTimeout(_saveTimer)
+          _saveTimer = setTimeout(() => {
+            saveReviewQueue(responses).catch(() => { /* retried on next mutation */ })
+          }, 600)
+        },
+        removeItem: async (_name: string) => {
+          saveReviewQueue([]).catch(() => {})
+        },
+      },
       version: 2,
+      skipHydration: false,
       // Sanitise data persisted before the status cleanup: 'edited' was both
       // a status and a flag; 'draft'/'done' were phantoms.
       migrate: (persisted: unknown) => {
