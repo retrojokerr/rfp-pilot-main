@@ -60,6 +60,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from fastapi import Depends
+from database import create_db_and_tables
 from auth import require, current_user, User, list_users, upsert_user, delete_user, ROLES
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -76,6 +77,11 @@ GROQ_DELAY = 0.3
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="RFP Pilot API", version="2.0")
+
+@app.on_event("startup")
+async def startup_event():
+    """Create DB tables on boot (idempotent — safe to run every startup)."""
+    create_db_and_tables()
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
