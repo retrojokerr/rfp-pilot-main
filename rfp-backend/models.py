@@ -64,8 +64,10 @@ class FeedbackPair(SQLModel, table=True):
     section: Optional[str] = None
     availability: Optional[str] = None
     confidence: Optional[float] = None
-    signal: Optional[str] = None   # approved | rejected | thumbs_up | thumbs_down
+    signal: Optional[str] = None   # approved | rejected | thumbs_up | thumbs_down | correction
     source: Optional[str] = None   # slack | workspace | assistant | review_queue
+    user_name: Optional[str] = None    # display name of who gave the feedback
+    user_email: Optional[str] = None   # email of who gave the feedback
     created_at: datetime = Field(default_factory=_now)
 
 

@@ -74,24 +74,21 @@ class User:
         return capability in self.capabilities
 
 
-# ── User registry (JSON file; swap for a DB table later) ─────
+# ── User registry (Postgres via SQLModel) ────────────────────
 
-def _load_users() -> dict:
-    if USERS_FILE.exists():
-        try:
-            return json.loads(USERS_FILE.read_text())
-        except Exception:
-            return {}
-    return {}
-
-
-def _save_users(users: dict) -> None:
-    USERS_FILE.write_text(json.dumps(users, indent=2))
+from sqlmodel import Session, select
+from database import engine
+from models import User as UserRow   # SQLModel table (distinct from the dataclass)
 
 
 def list_users() -> list[dict]:
-    users = _load_users()
-    return [{"email": e, **info} for e, info in sorted(users.items())]
+    with Session(engine) as s:
+        rows = s.exec(select(UserRow).order_by(UserRow.email)).all()
+        return [
+            {"email": r.email, "role": r.role, "name": r.name,
+             "updated_at": r.updated_at.isoformat() if r.updated_at else None}
+            for r in rows
+        ]
 
 
 def upsert_user(email: str, role: str, added_by: str) -> dict:
@@ -100,30 +97,37 @@ def upsert_user(email: str, role: str, added_by: str) -> dict:
     email = email.strip().lower()
     if not email or "@" not in email:
         raise HTTPException(400, "A valid email is required")
-    with _lock:
-        users = _load_users()
-        users[email] = {
-            "role": role,
-            "updated_by": added_by,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        _save_users(users)
-    return {"email": email, **users[email]}
+    with Session(engine) as s:
+        row = s.get(UserRow, email)
+        if row is None:
+            row = UserRow(email=email, role=role)
+            s.add(row)
+        else:
+            row.role = role
+        row.updated_at = datetime.now(timezone.utc)
+        s.commit()
+        s.refresh(row)
+        return {"email": row.email, "role": row.role,
+                "updated_by": added_by,
+                "updated_at": row.updated_at.isoformat()}
 
 
 def delete_user(email: str) -> None:
-    with _lock:
-        users = _load_users()
-        users.pop(email.strip().lower(), None)
-        _save_users(users)
+    email = email.strip().lower()
+    with Session(engine) as s:
+        row = s.get(UserRow, email)
+        if row:
+            s.delete(row)
+            s.commit()
 
 
 def resolve_role(email: str) -> str:
     """Role precedence: explicit registry entry > ADMIN_EMAILS bootstrap > DEFAULT_ROLE."""
     email = email.lower()
-    users = _load_users()
-    if email in users:
-        return users[email].get("role", "readonly")
+    with Session(engine) as s:
+        row = s.get(UserRow, email)
+        if row:
+            return row.role
     admin_emails = {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()}
     if email in admin_emails:
         return "admin"

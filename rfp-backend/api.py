@@ -159,44 +159,66 @@ def _save_history(entries: list[dict]) -> None:
 
 @app.get("/history", dependencies=[Depends(require("kb_read"))])
 def get_history():
-    entries = _load_history()
+    from sqlmodel import Session as _Session, select as _select
+    from database import engine as _engine
+    from models import HistoryEntry as _HistoryEntry
+    with _Session(_engine) as _s:
+        rows = _s.exec(_select(_HistoryEntry)).all()
+    entries = [r.payload for r in rows if r.payload]
     entries.sort(key=lambda e: e.get("uploadedAt", ""), reverse=True)
     return {"entries": entries[:200]}
 
 
 @app.put("/history")
 def upsert_history(entry: dict, user: User = Depends(require("generate"))):
-    """Create or merge-update an RFI history entry by id. Fields are stored
-    as sent by the frontend; the server stamps the owner on create."""
+    """Create or merge-update an RFI history entry by id (Postgres-backed)."""
+    from sqlmodel import Session as _Session
+    from database import engine as _engine
+    from models import HistoryEntry as _HistoryEntry
+    from sqlalchemy.orm.attributes import flag_modified
     eid = (entry.get("id") or "").strip()
     if not eid:
         raise HTTPException(400, "entry.id is required")
-    with _hist_lock:
-        entries = _load_history()
-        for e in entries:
-            if e.get("id") == eid:
-                e.update(entry)
-                e["updatedAt"] = datetime.now(timezone.utc).isoformat()
-                _save_history(entries)
-                return e
+    with _Session(_engine) as _s:
+        row = _s.get(_HistoryEntry, eid)
+        if row is not None:
+            merged = dict(row.payload or {})
+            merged.update(entry)
+            merged["updatedAt"] = datetime.now(timezone.utc).isoformat()
+            row.payload = merged
+            row.owner = merged.get("owner", row.owner)
+            row.filename = merged.get("filename", merged.get("name", row.filename))
+            flag_modified(row, "payload")
+            _s.commit()
+            _s.refresh(row)
+            return row.payload
         entry["owner"] = user.email
         entry["ownerName"] = user.name
         entry["updatedAt"] = datetime.now(timezone.utc).isoformat()
-        entries.append(entry)
-        _save_history(entries[-500:])
+        _s.add(_HistoryEntry(
+            id=eid,
+            owner=user.email,
+            filename=entry.get("filename", entry.get("name", "unknown")),
+            row_count=entry.get("rowCount", entry.get("row_count", 0)),
+            payload=entry,
+        ))
+        _s.commit()
         return entry
 
 
 @app.delete("/history/{entry_id}")
 def delete_history(entry_id: str, user: User = Depends(current_user)):
-    with _hist_lock:
-        entries = _load_history()
-        target = next((e for e in entries if e.get("id") == entry_id), None)
-        if not target:
+    from sqlmodel import Session as _Session
+    from database import engine as _engine
+    from models import HistoryEntry as _HistoryEntry
+    with _Session(_engine) as _s:
+        row = _s.get(_HistoryEntry, entry_id)
+        if row is None:
             return {"deleted": entry_id}
-        if user.role != "admin" and target.get("owner") != user.email:
+        if user.role != "admin" and row.owner != user.email:
             raise HTTPException(403, "Only the owner or an admin can remove a history entry")
-        _save_history([e for e in entries if e.get("id") != entry_id])
+        _s.delete(row)
+        _s.commit()
     return {"deleted": entry_id}
 
 
@@ -910,49 +932,51 @@ def ingest_feedback_correction(data: dict, user: User = Depends(require("correct
     except Exception as e:
         raise _safe_error(e)
 
-    # Append to the shared org-wide ledger (same file the Slack bot uses).
+    # Persist to the shared org-wide ledger in Postgres so every user's
+    # Feedback Loop page shows the same correction history.
     try:
-        log_path = Path(os.getenv("FEEDBACK_LOG", str(Path(__file__).parent / "feedback_log.jsonl")))
-        entry = {
-            "signal":      "correction",
-            "question":    question,
-            "good_answer": good_answer,
-            "bad_answer":  bad_answer,
-            "section":     section,
-            "source":      source,
-            "user":        user.name or user.email,
-            "email":       user.email,
-            "confidence":  data.get("confidence", 0),
-            "logged_at":   datetime.now(timezone.utc).isoformat(),
-        }
-        with log_path.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
+        from sqlmodel import Session as _Session
+        from database import engine as _engine
+        from models import FeedbackPair as _FeedbackPair
+        with _Session(_engine) as _s:
+            _s.add(_FeedbackPair(
+                signal="correction",
+                question=question,
+                good_answer=good_answer,
+                bad_answer=bad_answer,
+                section=section,
+                source=source,
+                user_name=user.name or user.email,
+                user_email=user.email,
+                confidence=float(data.get("confidence", 0) or 0),
+            ))
+            _s.commit()
     except Exception as e:
-        # The golden answer is already ingested — log failure is non-fatal
-        print(f"  [feedback] shared-log append failed: {e}")
+        print(f"  [feedback] postgres append failed: {e}")
 
     return {"status": "ingested", "vector_id": vector_id, "question": question[:80]}
 
 
 @app.get("/feedback", dependencies=[Depends(require("feedback_read"))])
 def get_feedback():
-    """Return all feedback pairs from the Slack bot log + in-memory store."""
-    log_path = Path(os.getenv("FEEDBACK_LOG", str(Path(__file__).parent / "feedback_log.jsonl")))
-    pairs = []
-
-    if log_path.exists():
-        raw = log_path.read_text()
-        for line in raw.strip().splitlines():
-            try:
-                entry = json.loads(line)
-                pairs.append(entry)
-            except Exception as e:
-                pass
-    else:
-        print(f"FILE NOT FOUND: {log_path}")
-
-    print(f"get_feedback: path={log_path} exists={log_path.exists()} pairs={len(pairs)}")
-
+    """Return all feedback pairs from Postgres (shared org-wide ledger)."""
+    from sqlmodel import Session as _Session, select as _select
+    from database import engine as _engine
+    from models import FeedbackPair as _FeedbackPair
+    with _Session(_engine) as _s:
+        rows = _s.exec(_select(_FeedbackPair).order_by(_FeedbackPair.created_at.desc())).all()
+    pairs = [{
+        "signal":      r.signal,
+        "question":    r.question,
+        "good_answer": r.good_answer,
+        "bad_answer":  r.bad_answer,
+        "section":     r.section,
+        "source":      r.source,
+        "user":        r.user_name,
+        "email":       r.user_email,
+        "confidence":  r.confidence,
+        "logged_at":   r.created_at.isoformat() if r.created_at else None,
+    } for r in rows]
     return {
         "pairs": pairs,
         "total": len(pairs),
