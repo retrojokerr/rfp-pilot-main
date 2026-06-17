@@ -78,6 +78,9 @@ GROQ_DELAY = 0.3
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="RFP Pilot API", version="2.0")
 
+from review_workflow import router as review_router
+app.include_router(review_router)
+
 @app.on_event("startup")
 async def startup_event():
     """Create DB tables on boot (idempotent — safe to run every startup)."""
