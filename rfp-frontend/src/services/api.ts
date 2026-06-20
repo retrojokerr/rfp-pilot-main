@@ -291,3 +291,76 @@ export async function fetchStats(): Promise<Record<string, number>> {
   const { data } = await api.get('/stats')
   return data
 }
+
+// ── Review workflow: submissions (Phase 1) ───────────────────
+export type ReviewFlagType = 'accepted' | 'corrected' | 'flagged' | 'untouched'
+
+export interface ReviewItemPayload {
+  question_id: string
+  question: string
+  section?: string
+  answer: string
+  original_answer?: string
+  corrected_answer?: string
+  flag_type: ReviewFlagType
+  confidence?: number
+  availability?: string
+}
+
+export interface ReviewItem extends ReviewItemPayload {
+  decision?: 'approved' | 'rejected' | null
+  comment?: string | null
+}
+
+export interface ReviewSubmission {
+  id: string
+  doc_id: string
+  sheet_name: string
+  submitted_by: string
+  submitted_at: string | null
+  status: 'pending' | 'approved' | 'sent_back'
+  reviewed_by: string | null
+  reviewed_at: string | null
+  reviewer_comment: string | null
+  items: ReviewItem[]
+  counts: { total: number; corrected: number; flagged: number; accepted: number }
+}
+
+export interface ItemDecisionPayload {
+  question_id: string
+  decision: 'approved' | 'rejected'
+  corrected_answer?: string
+  comment?: string
+}
+
+export async function createSubmission(payload: {
+  doc_id: string
+  sheet_name: string
+  items: ReviewItemPayload[]
+}): Promise<ReviewSubmission> {
+  const { data } = await api.post('/review/submissions', payload)
+  return data
+}
+
+export async function listSubmissions(): Promise<ReviewSubmission[]> {
+  const { data } = await api.get('/review/submissions')
+  return data.submissions ?? []
+}
+
+export async function getSubmission(id: string): Promise<ReviewSubmission> {
+  const { data } = await api.get(`/review/submissions/${id}`)
+  return data
+}
+
+export async function approveSubmission(id: string): Promise<{ status: string; ingested: number }> {
+  const { data } = await api.post(`/review/submissions/${id}/approve`)
+  return data
+}
+
+export async function sendBackSubmission(id: string, payload: {
+  decisions: ItemDecisionPayload[]
+  reviewer_comment?: string
+}): Promise<{ status: string }> {
+  const { data } = await api.post(`/review/submissions/${id}/send-back`, payload)
+  return data
+}

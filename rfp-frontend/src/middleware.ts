@@ -16,6 +16,13 @@ const BLOCKED: Record<string, string[]> = {
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
 
+  // LOCAL DEV ONLY: bypass the auth gate when explicitly enabled in development.
+  // Guarded by NODE_ENV so it can never weaken a production build.
+  if (process.env.NODE_ENV === 'development' &&
+      process.env.NEXT_PUBLIC_AUTH_DISABLED === 'true') {
+    return NextResponse.next()
+  }
+
   if (PUBLIC_EXACT.has(pathname) || pathname.startsWith(PUBLIC_PREFIX)) {
     return NextResponse.next()
   }
