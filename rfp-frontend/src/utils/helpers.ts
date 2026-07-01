@@ -7,13 +7,17 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function formatDate(iso: string): string {
+  const normalized = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + 'Z'
   return new Intl.DateTimeFormat('en-IN', {
     day: 'numeric', month: 'short', year: 'numeric',
-  }).format(new Date(iso))
+  }).format(new Date(normalized))
 }
 
 export function formatRelativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime()
+  // Backend timestamps are UTC but may lack a timezone marker. Append 'Z'
+  // when absent so the browser parses them as UTC, not local time.
+  const normalized = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + 'Z'
+  const diff = Date.now() - new Date(normalized).getTime()
   const mins = Math.floor(diff / 60_000)
   if (mins < 1) return 'just now'
   if (mins < 60) return `${mins}m ago`

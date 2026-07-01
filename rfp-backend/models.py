@@ -85,6 +85,8 @@ class ReviewSubmission(SQLModel, table=True):
     reviewed_by: Optional[str] = None
     reviewed_at: Optional[datetime] = None
     reviewer_comment: Optional[str] = Field(default=None, sa_column=Column(Text))
+    previous_submission_id: Optional[str] = Field(default=None, index=True)
+    cycle: int = Field(default=1)  # 1 = first submission, increments on resubmit
 
 
 class ReviewItem(SQLModel, table=True):

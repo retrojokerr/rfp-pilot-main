@@ -27,6 +27,26 @@ const FLAG_CONFIG: Record<string, { label: string; color: string }> = {
   untouched: { label: '',          color: 'text-zinc-400' },
 }
 
+
+// Group submissions by lineage (follow previous_submission_id); the reviewer's
+// active queue shows only the LATEST cycle of each chain. Older cycles are
+// history. Returns latest submissions + a map from submission id -> its
+// immediate predecessor (for prior-cycle context in the detail view).
+function latestPerLineage(subs: ReviewSubmission[]): {
+  latest: ReviewSubmission[]
+  prevOf: Record<string, string>
+} {
+  const referenced = new Set(
+    subs.map((s) => s.previous_submission_id).filter(Boolean) as string[]
+  )
+  const latest = subs.filter((s) => !referenced.has(s.id))
+  const prevOf: Record<string, string> = {}
+  for (const s of subs) {
+    if (s.previous_submission_id) prevOf[s.id] = s.previous_submission_id
+  }
+  return { latest, prevOf }
+}
+
 export default function ReviewQueuePage() {
   const [mounted, setMounted] = useState(false)
   const [submissions, setSubmissions] = useState<ReviewSubmission[]>([])
@@ -57,9 +77,10 @@ export default function ReviewQueuePage() {
   }), [submissions])
 
   const filtered = useMemo(() => {
-    if (!search.trim()) return submissions
+    const { latest } = latestPerLineage(submissions)
+    if (!search.trim()) return latest
     const q = search.toLowerCase()
-    return submissions.filter(s =>
+    return latest.filter(s =>
       s.sheet_name.toLowerCase().includes(q) ||
       s.submitted_by.toLowerCase().includes(q))
   }, [submissions, search])
@@ -124,6 +145,11 @@ export default function ReviewQueuePage() {
                     <span className={cn('text-xs px-1.5 py-0.5 rounded-md font-medium', st.bg, st.color)}>
                       {st.label}
                     </span>
+                    {(sub.cycle ?? 1) > 1 && (
+                      <span className="text-[11px] px-1.5 py-0.5 rounded-md font-medium bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400">
+                        Resubmission · cycle {sub.cycle}
+                      </span>
+                    )}
                   </div>
                   <ChevronRight className="w-4 h-4 text-zinc-400 shrink-0" />
                 </div>
@@ -152,6 +178,7 @@ function SubmissionDetail({ id, canApprove, onBack }: {
   onBack: () => void
 }) {
   const [sub, setSub] = useState<ReviewSubmission | null>(null)
+  const [prev, setPrev] = useState<ReviewSubmission | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   // per-item local edits & decisions for the send-back flow
@@ -161,9 +188,19 @@ function SubmissionDetail({ id, canApprove, onBack }: {
 
   useEffect(() => {
     (async () => {
-      try { setSub(await getSubmission(id)) }
-      catch { toast.error('Could not load submission') }
-      finally { setLoading(false) }
+      try {
+        const s = await getSubmission(id)
+        setSub(s)
+        // If this is a resubmission, fetch the prior cycle for context.
+        if (s.previous_submission_id) {
+          try { setPrev(await getSubmission(s.previous_submission_id)) }
+          catch { /* prior cycle context is best-effort */ }
+        }
+      } catch {
+        toast.error('Could not load submission')
+      } finally {
+        setLoading(false)
+      }
     })()
   }, [id])
 
@@ -193,16 +230,26 @@ function SubmissionDetail({ id, canApprove, onBack }: {
       toast.error('Reject at least one answer to send back')
       return
     }
-    // each rejected item needs a correction OR comment
+    // A rejected item needs EITHER a genuine edit (answer changed) OR a comment.
+    // The answer field is pre-filled, so "changed" means it differs from the
+    // original; an unchanged pre-fill does not count as a correction.
     const decisions: ItemDecisionPayload[] = []
     for (const qid of rejected) {
-      const corrected = edits[qid]?.trim()
+      const item = sub?.items.find((i) => i.question_id === qid)
+      const original = item?.corrected_answer || item?.answer || ''
+      const edited = (edits[qid] ?? original).trim()
       const comment = comments[qid]?.trim()
-      if (!corrected && !comment) {
-        toast.error('Each rejected answer needs a correction or comment')
+      const changed = edited.length > 0 && edited !== original.trim()
+      if (!changed && !comment) {
+        toast.error('Each rejected answer needs an edit or a comment')
         return
       }
-      decisions.push({ question_id: qid, decision: 'rejected', corrected_answer: corrected, comment })
+      decisions.push({
+        question_id: qid,
+        decision: 'rejected',
+        corrected_answer: changed ? edited : undefined,
+        comment,
+      })
     }
     setBusy(true)
     try {
@@ -239,6 +286,14 @@ function SubmissionDetail({ id, canApprove, onBack }: {
         {' · '}{sub.counts.total} questions
       </p>
 
+      {/* Prior-cycle context: a light one-line resubmission indicator */}
+      {prev && (sub.cycle ?? 1) > 1 && (
+        <div className="flex items-center gap-1.5 text-xs text-indigo-600 dark:text-indigo-400 mb-4">
+          <RefreshCw className="w-3.5 h-3.5" />
+          Resubmission (cycle {sub.cycle}) — you flagged {prev.items.filter((i) => i.decision === 'rejected').length} answer(s) last cycle
+        </div>
+      )}
+
       <div className="space-y-3">
         {sub.items.map((it) => (
           <ReviewItemCard
@@ -246,7 +301,7 @@ function SubmissionDetail({ id, canApprove, onBack }: {
             item={it}
             editable={isPending && canApprove}
             rejected={rejected.has(it.question_id)}
-            editValue={edits[it.question_id] ?? ''}
+            editValue={edits[it.question_id] ?? (it.corrected_answer || it.answer)}
             commentValue={comments[it.question_id] ?? ''}
             onToggleReject={() => toggleReject(it.question_id)}
             onEdit={(v) => setEdits(p => ({ ...p, [it.question_id]: v }))}
@@ -321,27 +376,27 @@ function ReviewItemCard({ item, editable, rejected, editValue, commentValue, onT
         )}
       </div>
 
-      <p className={cn('text-sm mt-2 whitespace-pre-wrap',
-        isAccepted ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-700 dark:text-zinc-300')}>
-        {item.corrected_answer || item.answer}
-      </p>
-
-      {rejected && (
+      {rejected ? (
         <div className="mt-3 space-y-2">
+          <label className="text-xs font-medium text-zinc-500">Edit the answer, or leave it and add a comment</label>
           <textarea
             value={editValue}
             onChange={(e) => onEdit(e.target.value)}
-            placeholder="Provide the corrected answer (or leave blank and add a comment)…"
-            rows={2}
-            className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-sm focus:outline-none focus:ring-2 focus:ring-red-500/20"
+            rows={4}
+            className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-sm focus:outline-none focus:ring-2 focus:ring-red-500/20 whitespace-pre-wrap"
           />
           <input
             value={commentValue}
             onChange={(e) => onComment(e.target.value)}
-            placeholder="Comment to the submitter (required if no correction)…"
+            placeholder="Comment to the submitter…"
             className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-sm focus:outline-none focus:ring-2 focus:ring-red-500/20"
           />
         </div>
+      ) : (
+        <p className={cn('text-sm mt-2 whitespace-pre-wrap',
+          isAccepted ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-700 dark:text-zinc-300')}>
+          {item.corrected_answer || item.answer}
+        </p>
       )}
     </div>
   )

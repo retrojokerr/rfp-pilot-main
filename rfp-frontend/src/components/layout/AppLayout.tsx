@@ -7,8 +7,7 @@ import { useSession, signOut } from 'next-auth/react'
 import {
   LayoutDashboard, FolderOpen, Database, Settings,
   History, Zap, ChevronRight, Moon, Sun, Menu, X,
-  MessageSquare, ClipboardCheck, LogOut, GitBranch,
-} from 'lucide-react'
+  MessageSquare, ClipboardCheck, LogOut, GitBranch, FileText} from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { useState, useEffect } from 'react'
 import { cn } from '@/utils/helpers'
@@ -31,6 +30,7 @@ const NAV_SECTIONS = [
       { href: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
       { href: '/workspace', icon: FolderOpen, label: 'Workspace' },
       { href: '/review-queue', icon: ClipboardCheck, label: 'Review Queue', badge: true },
+      { href: '/my-submissions', icon: FileText, label: 'My Submissions' },
       { href: '/feedback', icon: GitBranch, label: 'Feedback Loop' },
     ],
   },

@@ -44,6 +44,7 @@ class SubmissionIn(BaseModel):
     doc_id: str
     sheet_name: str
     items: list[ReviewItemIn]
+    previous_submission_id: Optional[str] = None
 
 
 class ItemDecision(BaseModel):
@@ -73,6 +74,8 @@ def _serialize(sub: ReviewSubmission, items: list[ReviewItem]) -> dict:
         "reviewed_by": sub.reviewed_by,
         "reviewed_at": sub.reviewed_at.isoformat() if sub.reviewed_at else None,
         "reviewer_comment": sub.reviewer_comment,
+        "previous_submission_id": sub.previous_submission_id,
+        "cycle": sub.cycle,
         "items": [{
             "question_id": i.question_id,
             "question": i.question,
@@ -101,9 +104,16 @@ def create_submission(payload: SubmissionIn, user: User = Depends(require("gener
     if not touched:
         raise HTTPException(400, "A submission needs at least one corrected or flagged answer")
     with Session(engine) as s:
+        cycle = 1
+        prev_id = payload.previous_submission_id
+        if prev_id:
+            prev = s.get(ReviewSubmission, prev_id)
+            if prev:
+                cycle = (prev.cycle or 1) + 1
         sub = ReviewSubmission(
             doc_id=payload.doc_id, sheet_name=payload.sheet_name,
             submitted_by=user.email, status="pending",
+            previous_submission_id=prev_id, cycle=cycle,
         )
         s.add(sub)
         s.flush()
@@ -135,10 +145,18 @@ def list_submissions(user: User = Depends(current_user)):
         if user.role not in ("reviewer", "admin"):
             q = q.where(ReviewSubmission.submitted_by == user.email)
         subs = s.exec(q).all()
-        out = []
-        for sub in subs:
-            items = s.exec(select(ReviewItem).where(ReviewItem.submission_id == sub.id)).all()
-            out.append(_serialize(sub, items))
+        if not subs:
+            return {"submissions": []}
+        # Fetch ALL items for these submissions in ONE query, then group in
+        # memory — avoids the N+1 round-trips to the database.
+        sub_ids = [sub.id for sub in subs]
+        all_items = s.exec(
+            select(ReviewItem).where(ReviewItem.submission_id.in_(sub_ids))
+        ).all()
+        items_by_sub: dict[str, list[ReviewItem]] = {}
+        for it in all_items:
+            items_by_sub.setdefault(it.submission_id, []).append(it)
+        out = [_serialize(sub, items_by_sub.get(sub.id, [])) for sub in subs]
         return {"submissions": out}
 
 
@@ -218,3 +236,48 @@ def send_back_submission(submission_id: str, payload: SendBackIn, user: User = D
                 f"/my-submissions?submission={sub.id}")
         s.commit()
         return {"status": "sent_back", "submission_id": sub.id}
+
+
+# ── Notifications (in-app) ────────────────────────────────────────────────────
+
+@router.get("/notifications")
+def get_notifications(user: User = Depends(current_user)):
+    with Session(engine) as s:
+        rows = s.exec(
+            select(Notification)
+            .where(Notification.user_email == user.email)
+            .order_by(Notification.created_at.desc())
+        ).all()
+        return {
+            "notifications": [{
+                "id": n.id, "type": n.type, "message": n.message,
+                "link": n.link, "read": n.read,
+                "created_at": n.created_at.isoformat() if n.created_at else None,
+            } for n in rows],
+            "unread": sum(1 for n in rows if not n.read),
+        }
+
+
+@router.post("/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: str, user: User = Depends(current_user)):
+    with Session(engine) as s:
+        n = s.get(Notification, notification_id)
+        if not n or n.user_email != user.email:
+            raise HTTPException(404, "Notification not found")
+        n.read = True
+        s.commit()
+        return {"ok": True}
+
+
+@router.post("/notifications/read-all")
+def mark_all_read(user: User = Depends(current_user)):
+    with Session(engine) as s:
+        rows = s.exec(
+            select(Notification).where(
+                Notification.user_email == user.email, Notification.read == False  # noqa: E712
+            )
+        ).all()
+        for n in rows:
+            n.read = True
+        s.commit()
+        return {"marked": len(rows)}

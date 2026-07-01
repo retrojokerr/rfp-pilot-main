@@ -322,6 +322,8 @@ export interface ReviewSubmission {
   reviewed_by: string | null
   reviewed_at: string | null
   reviewer_comment: string | null
+  previous_submission_id?: string | null
+  cycle?: number
   items: ReviewItem[]
   counts: { total: number; corrected: number; flagged: number; accepted: number }
 }
@@ -337,6 +339,7 @@ export async function createSubmission(payload: {
   doc_id: string
   sheet_name: string
   items: ReviewItemPayload[]
+  previous_submission_id?: string
 }): Promise<ReviewSubmission> {
   const { data } = await api.post('/review/submissions', payload)
   return data
@@ -363,4 +366,27 @@ export async function sendBackSubmission(id: string, payload: {
 }): Promise<{ status: string }> {
   const { data } = await api.post(`/review/submissions/${id}/send-back`, payload)
   return data
+}
+
+// ── Notifications (in-app) ───────────────────────────────────
+export interface AppNotification {
+  id: string
+  type: string
+  message: string
+  link: string | null
+  read: boolean
+  created_at: string | null
+}
+
+export async function fetchNotifications(): Promise<{ notifications: AppNotification[]; unread: number }> {
+  const { data } = await api.get('/review/notifications')
+  return data
+}
+
+export async function markNotificationRead(id: string): Promise<void> {
+  await api.post(`/review/notifications/${id}/read`)
+}
+
+export async function markAllNotificationsRead(): Promise<void> {
+  await api.post('/review/notifications/read-all')
 }

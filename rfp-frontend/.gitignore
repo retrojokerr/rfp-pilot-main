@@ -32,3 +32,4 @@ qdrant_storage/
 # Credentials
 credentials.json
 rfp-backend/credentials.json
+tsconfig.tsbuildinfo

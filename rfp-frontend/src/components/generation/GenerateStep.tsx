@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react'
 import { motion, AnimatePresence, MotionConfig } from 'framer-motion'
 import {
   AlertCircle, RefreshCw, Download, ChevronDown, ChevronUp,
-  Edit2, Check, X, Sparkles, BarChart3, Upload, Square, Play,
+  Edit2, Check, X, Sparkles, BarChart3, Upload, Square, Play, Send, ClipboardCheck, Flag,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn, availabilityConfig, confidenceBg, formatConfidence, isAnswered } from '@/utils/helpers'
@@ -16,7 +16,7 @@ import { startGeneration, stopGeneration, resetGeneration } from '@/stores/gener
 import { exportToOriginalWorkbook, exportSheetAsNewWorkbook } from '@/utils/exporter'
 import { useReviewStore } from '@/stores/reviewStore'
 import { useFeedbackStore } from '@/stores/feedbackStore'
-import { generateAnswer, parseApiError, ingestCorrection } from '@/services/api'
+import { generateAnswer, parseApiError, ingestCorrection, createSubmission, type ReviewItemPayload, type ReviewFlagType } from '@/services/api'
 import type { GeneratedResponse, AvailabilityLabel } from '@/types'
 
 const AVAIL_OPTIONS: AvailabilityLabel[] = ['Yes', 'No', 'Partial', 'Unknown']
@@ -39,6 +39,74 @@ export default function GenerateStep() {
   const [exportMode, setExportMode] = useState<'sheet' | 'full' | null>(null)
   const [exportName, setExportName] = useState('')
   const [editText, setEditText] = useState('')
+
+  // ── Review decision per answer (Phase 2) ───────────────────
+  // 'kb_direct' = correction ingests immediately (default for KB-direct edits)
+  // 'review'    = correction staged, ingests only on reviewer approval
+  // 'flag'      = no correction; sent for review as-is (locked)
+  type Decision = 'kb_direct' | 'review' | 'flag'
+  const [decisions, setDecisions] = useState<Record<string, Decision>>({})
+  const [submitting, setSubmitting] = useState(false)
+
+  function setDecision(id: string, d: Decision) {
+    setDecisions((prev) => ({ ...prev, [id]: d }))
+  }
+
+  // Items marked for the reviewer (corrected OR flagged) gate the submit button.
+  const reviewMarkedIds = Object.entries(decisions)
+    .filter(([, d]) => d === 'review' || d === 'flag')
+    .map(([id]) => id)
+  const hasReviewItems = reviewMarkedIds.length > 0
+
+  async function handleSendForReview() {
+    const wizard = useWizardStore.getState()
+    const workbook = wizard.workbook
+    if (!workbook) {
+      toast.error('No workbook found. Please re-upload your file.')
+      return
+    }
+    // Snapshot ALL answered responses in the current selection — including
+    // untouched/KB-direct ones — so the reviewer sees the whole sheet and the
+    // export can rebuild the original structure (section/subsection/sourceRow).
+    const answered = currentResponses.filter((r) => isAnswered(r.status))
+    if (answered.length === 0) {
+      toast.error('Nothing to send — generate answers first.')
+      return
+    }
+    const items: ReviewItemPayload[] = answered.map((r) => {
+      const d = decisions[r.id] ?? 'kb_direct'
+      const flag_type: ReviewFlagType =
+        d === 'review' ? 'corrected' : d === 'flag' ? 'flagged' : 'accepted'
+      const sourceItem = wizard.items.find((it) => it.id === r.id)
+      return {
+        question_id: r.id,
+        question: r.question,
+        section: r.section || sourceItem?.section || '',
+        answer: r.editedRemarks ?? r.remarks,
+        original_answer: r.remarks,
+        corrected_answer: flag_type === 'corrected' ? (r.editedRemarks ?? r.remarks) : undefined,
+        flag_type,
+        confidence: r.confidence?.score,
+        availability: r.availability,
+      }
+    })
+    setSubmitting(true)
+    try {
+      const sub = await createSubmission({
+        doc_id: wizard.currentRfiId || workbook.filename,
+        sheet_name: workbook.filename,
+        items,
+      })
+      toast.success('Sent for review', {
+        description: `${sub.counts.corrected} corrected · ${sub.counts.flagged} flagged · ${sub.counts.accepted} accepted`,
+      })
+      setDecisions({})
+    } catch (err) {
+      toast.error('Could not send for review', { description: parseApiError(err) })
+    } finally {
+      setSubmitting(false)
+    }
+  }
 
   const selectedItems = items.filter((i) => selectedIds.has(i.id))
   const total = selectedItems.length
@@ -87,18 +155,19 @@ export default function GenerateStep() {
   function saveEdit(id: string) {
     const updated = useWizardStore.getState().responses.find(r => r.id === id)
     updateResponseEdit(id, editText)
+    const decision = decisions[id] ?? 'kb_direct'
     if (updated && editText !== updated.remarks) {
-      // Push to review store
-      useReviewStore.getState().upsertResponse({
-        ...updated,
-        editedRemarks: editText,
-        status: 'needs_review',
-        auditLog: [
-          ...(updated.auditLog ?? []),
-          { id: Math.random().toString(36).slice(2), type: 'edited' as const, actor: 'Reviewer', timestamp: new Date().toISOString() }
-        ],
-      })
-      // Capture feedback pair
+      // Editing an answer that is staged for review marks it 'corrected' but
+      // DEFERS knowledge-base ingestion until a reviewer approves. Editing in
+      // the KB-direct path ingests immediately (the original fast path).
+      if (decision === 'review') {
+        toast.success('Correction staged for review', {
+          description: 'Will be added to the knowledge base when a reviewer approves.',
+        })
+        setEditingId(null)
+        return
+      }
+      // KB-direct path: ingest immediately.
       useFeedbackStore.getState().capture({
         question: updated.question,
         section: updated.section,
@@ -109,10 +178,6 @@ export default function GenerateStep() {
         signal: 'edited',
         source: 'workspace',
       })
-      // PRIORITY-1 KNOWLEDGE: a human correcting an answer during an RFI run
-      // is the strongest signal we have. Ingest it into the knowledge base
-      // immediately (source recorded as 'workspace') so the very next
-      // question on this topic uses the corrected answer.
       ingestCorrection({
         question: updated.question,
         good_answer: editText,
@@ -123,11 +188,11 @@ export default function GenerateStep() {
           description: 'Could not reach the backend to update the knowledge base.',
         })
       })
+      toast.success('Answer updated', {
+        description: 'Added to the knowledge base',
+      })
     }
     setEditingId(null)
-    toast.success('Answer updated', {
-      description: 'Sent to Review Queue and ingested into the knowledge base',
-    })
   }
 
   async function retryOne(item: GeneratedResponse) {
@@ -285,6 +350,24 @@ export default function GenerateStep() {
 
           {allDone && (
             <>
+              {canCorrect && (
+                <Tooltip
+                  content={hasReviewItems
+                    ? 'Send this sheet to a reviewer'
+                    : 'Mark at least one answer "Correct & review" or "Flag for review" first'}
+                  side="bottom"
+                >
+                  <button
+                    onClick={handleSendForReview}
+                    disabled={!hasReviewItems || submitting}
+                    className={cn('btn-primary', (!hasReviewItems || submitting) && 'opacity-50 cursor-not-allowed')}
+                  >
+                    <Send className="w-4 h-4" />
+                    {submitting ? 'Sending…' : 'Send for review'}
+                    {hasReviewItems && <span className="tnum">({reviewMarkedIds.length})</span>}
+                  </button>
+                </Tooltip>
+              )}
               <Tooltip content="Download this sheet with answers injected" side="bottom">
                 <button onClick={() => openExportDialog('sheet')} className="btn-primary">
                   <Download className="w-4 h-4" />
@@ -513,6 +596,40 @@ export default function GenerateStep() {
                             ))}
                           </div>
                         </div>
+
+                        {/* Review decision (Phase 2): KB-direct / correct+review / flag */}
+                        {canCorrect && (
+                          <div className="space-y-1.5">
+                            <span className="text-xs text-muted-foreground">When done:</span>
+                            <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Review decision">
+                              {([
+                                { key: 'kb_direct', label: 'Accept', icon: Check, hint: 'Answer is good as-is — ships in the sheet, no review needed' },
+                                { key: 'review', label: 'Correct & review', icon: ClipboardCheck, hint: 'Staged — ingests when a reviewer approves' },
+                                { key: 'flag', label: 'Flag for review', icon: Flag, hint: 'Send as-is for a second opinion' },
+                              ] as const).map((opt) => {
+                                const active = (decisions[r.id] ?? 'kb_direct') === opt.key
+                                const Icon = opt.icon
+                                return (
+                                  <Tooltip key={opt.key} content={opt.hint} side="top">
+                                    <button
+                                      onClick={() => setDecision(r.id, opt.key)}
+                                      role="radio"
+                                      aria-checked={active}
+                                      className={cn(
+                                        'h-8 px-2.5 rounded-md text-xs font-semibold border inline-flex items-center gap-1.5 transition-colors duration-150',
+                                        active
+                                          ? 'text-primary bg-primary/10 border-primary/40'
+                                          : 'text-muted-foreground bg-card border-border hover:bg-accent'
+                                      )}
+                                    >
+                                      <Icon className="w-3 h-3" /> {opt.label}
+                                    </button>
+                                  </Tooltip>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )}
 
                         {/* Remarks */}
                         {editing ? (
