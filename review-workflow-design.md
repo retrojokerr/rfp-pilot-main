@@ -1,151 +1,200 @@
 # Document-Centric Review Workflow — Design
 
-Status: proposed. Replaces the current per-question review model with a
-per-sheet (submission) review workflow, plus in-app notifications and an
-approved-sheets view for submitters.
+Status: **implemented** (Phases 1–4). Replaces the per-question review model
+with a per-sheet (submission) review workflow on Postgres, plus in-app
+notifications and a "My Submissions" view for submitters.
+
+> This doc reflects what is actually built. Sections marked _(pending)_ are
+> designed but not yet implemented.
 
 ## Why
 
-Today the unit of review is a single answer (`responses[]`, each with its own
-status). Real RFP review is document-centric: a person works a whole sheet,
-then hands it to a reviewer as one package. This redesign makes the
-**submission** (a snapshot of a sheet + its answers) the unit of review.
+Previously the unit of review was a single answer (`responses[]`, each with its
+own status, stored in browser localStorage). Real RFP review is
+document-centric: a person works a whole sheet, then hands it to a reviewer as
+one package. This redesign makes the **submission** (a snapshot of a sheet + its
+answers) the unit of review, persisted server-side in Postgres.
 
 ## Roles
 
 - **Submitter** — anyone with `generate` (solutions_engineer, reviewer, admin).
   Works the sheet, decides per-answer what happens, submits for review.
-- **Reviewer** — `reviewer` + `admin`. Reviews submissions, edits/approves/
-  rejects, triggers KB ingestion on approval, exports.
+- **Reviewer** — `reviewer` + `admin`. Reviews submissions, approves (triggers
+  KB ingestion) or sends back with feedback.
 
 ## Per-answer decision (Workspace, after generation)
 
 For each generated answer the submitter picks one of three paths:
 
-1. **Send to KB directly** — correction ingested immediately as a golden
-   answer (current behavior). Shows in Feedback Loop. Not reviewed.
-2. **Correct + send for review** — correction is staged but NOT ingested.
-   KB ingestion is deferred until a reviewer approves.
+1. **Accept** (default) — the answer is good as-is; it ships in the sheet.
+   No knowledge-base write. (Correct AI answers are NOT re-ingested — the KB
+   only learns from human corrections.) If the submitter *edits* an accepted
+   answer, that edit ingests immediately (the fast path / strongest signal).
+2. **Correct & send for review** — the submitter's correction is staged but
+   NOT ingested. KB ingestion is deferred until a reviewer approves.
 3. **Flag for review (no correction)** — submitter is unsure; wants a second
-   opinion. Answer unchanged, tagged "flagged".
+   opinion. The answer is locked as-is (not editable in this path) and tagged
+   "flagged". Editing instead means using path 2.
 
 ### Submission rule
 
-- If **all** answers are path 1 (KB-direct) → no submission; sheet ships.
+- If **all** answers are Accept → no submission; the sheet just ships.
 - If **any** answer is path 2 or 3 → the whole sheet becomes one
   **ReviewSubmission**.
-- In a mixed sheet, path-1 answers are included in the submission but
-  **tagged "accepted"** — visible to the reviewer for context, not actionable.
+- In a mixed sheet, accepted answers are included in the submission but tagged
+  **"accepted"** — visible to the reviewer for context, non-actionable (dimmed).
 
 ## Reviewer experience (Review Queue → file view)
 
-The Review Queue changes from question-cards to **submission-cards**:
+The Review Queue shows **submission-cards** (not question-cards):
 
-> Sheet: `[CSB Bank] Use Cases.xlsx` · submitted by Subandhu · 2h ago
-> 12 questions · 3 corrected · 1 flagged · 8 accepted
+> Sheet: `DSPM_RFP.xlsx` · submitted by {email} · 2h ago
+> 5 questions · 1 corrected · 1 flagged  [Resubmission · cycle 2]
+
+The queue shows only the **latest cycle** of each lineage (resubmissions don't
+appear as duplicates). Resubmitted sheets carry a "Resubmission · cycle N" badge.
 
 Opening a submission shows the **whole sheet**:
-- **Touched** answers (corrected / flagged) are highlighted as needing attention.
-- **Accepted** (path-1) answers are shown, dimmed, non-actionable.
-- **Untouched** answers shown normally; implicitly accepted on approval.
+- **Touched** answers (corrected / flagged) are highlighted.
+- **Accepted** answers are shown dimmed, non-actionable.
+- On a resubmission, a one-line banner notes "you flagged N answers last cycle".
 
 Per touched answer, the reviewer can:
-- **Edit** (correct further), then approve
-- **Approve** as-is
-- **Reject** — requires EITHER a corrected answer OR a comment (mandatory).
-  Rejecting any answer flags the sheet to go back to the submitter.
+- **Approve** as-is, or
+- **Reject** — the answer becomes inline-editable (pre-filled). The reviewer
+  either edits it (a genuine change) OR leaves it and adds a comment. One of
+  the two is required. Rejecting any answer sends the whole sheet back.
 
-### Sheet-level outcome
+**No reviewer inline-edit-then-approve.** The reviewer approves the sheet or
+rejects answers (with correction/comment) that send it back. (Decided: reviewers
+don't silently edit-and-approve; corrections flow through the submitter.)
 
-- **Approve sheet** — all touched answers approved. KB ingestion happens now
-  for every corrected answer in the submission (path 2 + reviewer edits).
-  Success prompt. Reviewer can export. Submitter notified.
-- **Send back** — if any answer was rejected (with correction/comment), the
-  whole submission returns to the submitter with that feedback. Submitter
-  addresses it and re-submits (new review cycle).
+### Sheet-level outcome — Model A (all-or-nothing)
 
-## Submitter experience after review
+- **Approve sheet** — all corrected/flagged-with-correction answers ingest to
+  the KB now. Reviewer is stamped; submitter notified. _(Export: pending — see
+  Phase 5.)_
+- **Send back** — if any answer is rejected, the **whole** sheet returns to the
+  submitter with the feedback. **Nothing ingests.** The submitter addresses the
+  rejected items and resubmits, creating a new cycle. Ingestion happens only on
+  an eventual full approval. **No partial ingestion on send-back.**
 
-A new **"My Submissions"** page (for users with `generate`):
-- Lists their submissions with status: pending / approved / sent-back.
-- **Approved** → can view the final sheet (with changes highlighted) and export.
-- **Sent back** → sees reviewer's rejections/comments, can edit + re-submit.
+## Submitter experience — "My Submissions"
 
-## Notifications (in-app only, v1)
+A dedicated page (for users with `generate`):
+- Submissions grouped by **sheet lineage** (following `previous_submission_id`).
+  Each sheet is one card; resubmission cycles show as a thread (current cycle
+  emphasized, older cycles dimmed).
+- **Pending** → read-only "awaiting review".
+- **Approved** → success banner. _(Export: pending — see Phase 5.)_
+- **Sent back (latest cycle)** → shows only the rejected items with the
+  reviewer's comment/suggested answer; each answer is editable; **Resubmit**
+  creates a new cycle (Option A: each cycle is its own record; prior cycles
+  preserved as read-only history).
+- **Superseded cycles** (already resubmitted) render read-only — no edit fields,
+  no resubmit.
 
-- **On submit** → reviewers see a dashboard notification: "New sheet for
-  review from {submitter}".
-- **On approve / send-back** → submitter sees a notification: "Your sheet
-  {name} was approved / sent back".
-- Implemented as a lightweight `notifications` list per user (bell icon +
-  dashboard widget). No email/Slack in v1.
+## Notifications (in-app, v1)
 
-## Data model
+- **On submit** → each reviewer/admin (except the submitter) gets a
+  `submission_received` notification.
+- **On approve** → submitter gets `submission_approved`.
+- **On send-back** → submitter gets `submission_sent_back`.
+- Backend endpoints exist: `GET /review/notifications`,
+  `POST /review/notifications/{id}/read`, `POST /review/notifications/read-all`.
+- _Frontend bell/dropdown UI: pending._ No email/Slack in v1.
+
+## Data model (Postgres / SQLModel)
+
+Tables (see `models.py`, migrated via Alembic):
 
 ```
 ReviewSubmission {
-  id
-  doc_id            # the workspace document
-  sheet_name
-  submitted_by      # email
-  submitted_at
-  status            # pending | approved | sent_back
-  reviewed_by       # email, null until acted on
-  reviewed_at
-  items: [ ReviewItem ]
+  id, doc_id, sheet_name
+  submitted_by, submitted_at
+  status                      # pending | approved | sent_back
+  reviewed_by, reviewed_at
+  reviewer_comment
+  previous_submission_id      # resubmission lineage (Option A)
+  cycle                       # 1 = first; increments on resubmit
 }
 
 ReviewItem {
-  question_id
-  question
-  section
-  answer            # current answer text
-  original_answer   # AI's first draft (for change highlighting)
-  corrected_answer  # submitter or reviewer correction, if any
-  flag_type         # accepted | corrected | flagged | rejected
-  decision          # null | approved | rejected
-  comment           # required when rejected without a correction
-  confidence
+  id, submission_id (FK)
+  question_id, question, section
+  answer                      # current answer text
+  original_answer             # AI's first draft
+  corrected_answer            # correction, if any (only set when it differs)
+  flag_type                   # accepted | corrected | flagged | untouched
+  decision                    # null | approved | rejected
+  comment                     # reviewer feedback on reject
+  confidence, availability
 }
 
-Notification {
-  id, user_email, type, message, link, read, created_at
-}
+Notification { id, user_email, type, message, link, read, created_at }
 ```
 
-Storage: JSON files on the existing `feedback_data` volume
-(`review_submissions.json`, `notifications.json`), mirroring the current
-review_queue/feedback pattern. (Postgres is the eventual upgrade.)
+Also migrated to Postgres: `users`, `history`, `feedback_pairs` (previously
+JSON files). The old per-answer `review_queue.json` was NOT migrated — it
+doesn't map to the submission model, and its corrections already live in Qdrant.
 
 ## KB ingestion rules (the critical invariant)
 
-- Path 1 (KB-direct): ingest immediately. ✅ today's behavior.
-- Path 2 (correct + review): ingest ONLY when the reviewer approves the sheet.
-- Path 3 (flag, no correction): no ingestion unless the reviewer supplies a
-  correction and approves.
-- Rejected answer: never ingested.
+- **Accept**: no ingestion (correct AI answers are never re-ingested). An edit
+  to an accepted answer ingests immediately (fast path).
+- **Correct & review**: ingests ONLY when the reviewer approves the sheet.
+- **Flag (no correction)**: no ingestion unless a reviewer supplies a correction
+  and approves.
+- **Rejected / sent-back**: never ingested. Ingestion for a bounced sheet waits
+  until it is eventually fully approved.
 
-This guarantees the KB only ever learns reviewer-blessed corrections (except
-the explicit fast-path #1, which is a deliberate trust shortcut).
+The KB only ever learns human-blessed corrections — never the model's own
+un-edited output.
 
-## Phasing (ship + test independently)
+## Phasing
 
-- **Phase 1** — ReviewSubmission model + endpoints; Workspace "Send for
-  Review" snapshot; Review Queue file-view; reviewer approve/send-back with
-  KB ingestion on approval. (The core.)
-- **Phase 2** — per-answer three-way decision UI in Workspace with tags.
-- **Phase 3** — in-app notifications (bell + dashboard widget).
-- **Phase 4** — "My Submissions" page for submitters (view changes, export).
+- **Phase 1** ✅ — ReviewSubmission model + endpoints; Workspace "Send for
+  Review" snapshot; Review Queue file-view; approve/send-back with KB ingestion.
+- **Phase 2** ✅ — per-answer three-way decision UI in the Workspace.
+- **Phase 3** 🔶 — notifications: backend done; bell/dropdown UI pending.
+- **Phase 4** ✅ — "My Submissions" page (cycle lineage, resubmit, read-only
+  history). Export within it is pending (Phase 5).
+- **Phase 5** ⬜ — **Faithful export** (below).
+
+## Phase 5 — Faithful export (pending, REQUIRED)
+
+The exported file must reproduce the questionnaire **as uploaded** — sections,
+subsections, sheet names, row order, original layout — with approved answers
+written into the response column of the original rows.
+
+Current `_export_xlsx` builds a NEW summary workbook and does NOT preserve
+structure. Required approach:
+1. **Persist the original uploaded file** at upload (bytes in Postgres/object
+   storage keyed by doc_id). Currently discarded after parsing.
+2. **At export, reopen the original** with openpyxl.
+3. **Use `source_row`** (already captured by `parser.ExtractedItem`) to write
+   each approved answer into the correct original row + response column.
+4. **Preserve** sheets/sections/subsections/order/formatting by writing INTO the
+   original rather than regenerating.
+
+Parser already captures section, subsection, source_row, multi-sheet — so the
+structural info exists. Missing: (a) persist the original file, (b) write-back
+export.
 
 ## Open questions / risks
 
-- **In-memory DOCUMENTS**: submissions snapshot the sheet, so they survive
-  even if the live DOCUMENTS dict resets — good. But the Workspace itself
-  still loses un-submitted state on restart (pre-existing limitation).
-- **Concurrent reviews**: two reviewers opening the same submission. v1 =
-  last-write-wins (acceptable at current scale).
-- **Re-submission loop**: a sheet sent back then re-submitted creates a new
-  review cycle; keep the prior cycle's comments visible for context.
-- **Migration**: the current `review_queue.json` (per-answer) doesn't map
-  cleanly to submissions. v1 likely starts the new model fresh; old items
-  stay viewable in a legacy view or are dropped.
+- **In-memory DOCUMENTS**: submissions snapshot the sheet, so they survive a
+  DOCUMENTS reset. But the Workspace still loses un-submitted state on restart
+  (pre-existing; candidate for future persistence).
+- **Concurrent reviews**: two reviewers on one submission → last-write-wins
+  (acceptable at current scale).
+- **Timezone**: timestamps stored UTC; frontend appends `Z` when a tz marker is
+  absent so relative times parse correctly. A cleaner fix is tz-aware columns
+  (`TIMESTAMP WITH TIME ZONE`) — minor follow-up.
+- **Two-user testing**: with `AUTH_DISABLED` all requests are `dev@local`, so
+  submitter≠reviewer paths (access guards, notification routing) are untested
+  locally. Verify on the deployed instance with real accounts.
+- **Reviewer "suggested answer" ambiguity**: `corrected_answer` is only shown to
+  the submitter as a reviewer suggestion when it differs from the answer (guards
+  against carried-over text reading as a suggestion). A cleaner model would use a
+  distinct `reviewer_suggested_answer` field.
