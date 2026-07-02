@@ -55,12 +55,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from fastapi import Depends
-from database import create_db_and_tables
+from database import create_db_and_tables, engine
+from sqlmodel import Session
+from models import OriginalDocument
 from auth import require, current_user, User, list_users, upsert_user, delete_user, ROLES
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -126,6 +128,25 @@ def _require_doc_access(doc_id: str, user: "User"):
     if user.role != "admin" and doc.get("owner_email") not in (None, user.email):
         raise HTTPException(403, "You do not have access to this document")
     return doc
+
+
+def _persist_original_document(doc_id: str, filename: str, content: bytes, uploaded_by: str) -> None:
+    """
+    Phase 5: store the raw uploaded workbook keyed by doc_id so the review
+    export endpoint can later reopen it and write approved answers back into
+    the original sheet structure. Called after successful parsing so we don't
+    keep orphan bytes for files that failed to parse.
+    """
+    ext = Path(filename or "").suffix.lower().lstrip(".") or "bin"
+    with Session(engine) as s:
+        s.add(OriginalDocument(
+            doc_id=doc_id,
+            filename=filename or f"upload.{ext}",
+            content_type=ext,
+            content=content,
+            uploaded_by=uploaded_by,
+        ))
+        s.commit()
 
 
 # ── Health ────────────────────────────────────────────────────
@@ -433,8 +454,52 @@ def answer_question(request: Request, req: QuestionRequest, user: User = Depends
 
 # ── Upload & parse ────────────────────────────────────────────
 
+@app.post("/documents/upload", dependencies=[Depends(require("generate"))])
+async def upload_document_raw(
+    file: UploadFile = File(...),
+    doc_id: str = Form(...),
+    user: User = Depends(current_user),
+):
+    """
+    Phase 5: idempotent raw-bytes upload keyed by client-supplied doc_id.
+    Populates original_documents for the review-workflow export endpoint
+    to reopen later. Called by the frontend at submit-for-review time so
+    the reviewer/submitter can export the answered file after approval.
+
+    Returns 200 with a small JSON payload in both cases (new or existing).
+    """
+    content = await file.read()
+    _validate_upload(file.filename or "", content)
+
+    with Session(engine) as s:
+        existing = s.get(OriginalDocument, doc_id)
+        if existing:
+            return {
+                "doc_id": doc_id,
+                "status": "already_stored",
+                "bytes": len(existing.content),
+                "filename": existing.filename,
+            }
+        ext = Path(file.filename or "").suffix.lower().lstrip(".") or "bin"
+        s.add(OriginalDocument(
+            doc_id=doc_id,
+            filename=file.filename or f"upload.{ext}",
+            content_type=ext,
+            content=content,
+            uploaded_by=user.email,
+        ))
+        s.commit()
+
+    return {
+        "doc_id": doc_id,
+        "status": "stored",
+        "bytes": len(content),
+        "filename": file.filename or f"upload.{ext}",
+    }
+
+
 @app.post("/parse", dependencies=[Depends(require("generate"))])
-async def parse_only(file: UploadFile = File(...)):
+async def parse_only(file: UploadFile = File(...), user: User = Depends(current_user)):
     """
     FAST endpoint: parse document and return extracted questions immediately.
     No answer generation — use /generate/{doc_id} after this to get answers.
@@ -453,6 +518,10 @@ async def parse_only(file: UploadFile = File(...)):
         raise HTTPException(422, "No questions or requirements found in the document.")
 
     doc_id = str(uuid.uuid4())[:8]
+    # Phase 5: persist the raw workbook so the export endpoint can write
+    # approved answers back into the original sheet structure later.
+    _persist_original_document(doc_id, file.filename or "", content, user.email)
+
     DOCUMENTS[doc_id] = {
         "id":          doc_id,
         "owner_email": user.email,
@@ -531,6 +600,10 @@ async def upload_document(file: UploadFile = File(...), user: User = Depends(cur
 
     # 4. Store all items but only answered responses
     doc_id = str(uuid.uuid4())[:8]
+    # Phase 5: persist the raw workbook so the export endpoint can write
+    # approved answers back into the original sheet structure later.
+    _persist_original_document(doc_id, file.filename or "", content, user.email)
+
     DOCUMENTS[doc_id] = {
         "id":          doc_id,
         "owner_email": user.email,

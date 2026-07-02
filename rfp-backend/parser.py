@@ -49,6 +49,8 @@ class ExtractedItem:
     item_type: str         # "question" | "requirement" | "compliance" | "evaluation"
     priority: str          # "high" | "medium" | "low"
     source_row: Optional[int] = None
+    sheet_name: str = ""              # worksheet the item was extracted from
+    source_col: Optional[int] = None  # 0-indexed column to write answer into on export
     raw_text: str = ""     # original text, for audit only — never echoed in answers
 
 
@@ -118,6 +120,13 @@ SKIP_COL_NAMES = [
     "priority level", "risk", "impact", "effort",
     "done", "completed", "closed", "resolution",
     "link", "url", "ticket", "jira",
+]
+# Response-column headers — the write-back target for faithful export (Phase 5).
+# Order matters: more specific first, so "matters response" is preferred over
+# a bare "response" if both were somehow present.
+RESPONSE_COL_NAMES = [
+    "matters response", "our response", "vendor response",
+    "response", "answer", "reply",
 ]
 
 HIGH_PRIORITY_KEYWORDS = [
@@ -278,37 +287,60 @@ def _detect_header_row(sheet) -> tuple:
       section_col   → int index of category/section column (optional)
       subsection_col → int index of sub-category column (optional)
       skip_cols     → set of int indices to ignore (response/score columns)
+      response_col  → int index of the primary response/answer column, if any
+                      (write-back target for Phase 5 faithful export)
     """
+    # Scored search across first 8 rows — pick the row with the STRONGEST
+    # combination of role-token hits, not just the first row with any hit.
+    # This avoids the classic false positive where a merged title cell like
+    # "POC Use Case Catalog" (matches 'use case') dominates over the real
+    # header row 3 rows down ("ID | Use Case | Matters Response | ...").
+    # Scoring: question_col +2, response_col +2, plain skip_col +1,
+    # section/subsection +1. Strict > preserves first-wins on ties, so
+    # single-header-row files behave identically to the old logic.
+    best_score = 0
+    best_result: tuple = (None, {})
+
     for row_idx, row in enumerate(sheet.iter_rows(max_row=8, values_only=True), start=1):
         cells = [str(c).strip().lower() if c is not None else "" for c in row]
-        non_empty = [c for c in cells if c]
-        if len(non_empty) < 1:
-            continue
-
-        q_match  = sum(1 for c in cells if any(k in c for k in QUESTION_COL_NAMES))
-        s_match  = sum(1 for c in cells if any(k in c for k in SECTION_COL_NAMES))
-
-        if q_match == 0 and s_match == 0:
+        if not any(cells):
             continue
 
         mapping = {"skip_cols": set()}
+        score = 0
         for col_idx, cell in enumerate(cells):
             if not cell:
                 continue
             if _is_skip_column(cell):
                 mapping["skip_cols"].add(col_idx)
+                # First skip-column matching a response-y name becomes the
+                # write-back target for Phase 5 export.
+                if "response_col" not in mapping:
+                    for _name in RESPONSE_COL_NAMES:
+                        if _name in cell:
+                            mapping["response_col"] = col_idx
+                            score += 2
+                            break
+                    else:
+                        score += 1
+                else:
+                    score += 1
                 continue
             if any(k in cell for k in QUESTION_COL_NAMES) and "question_col" not in mapping:
                 mapping["question_col"] = col_idx
+                score += 2
             elif any(k in cell for k in SECTION_COL_NAMES) and "section_col" not in mapping:
                 mapping["section_col"] = col_idx
+                score += 1
             elif any(k in cell for k in SUBSECTION_COL_NAMES) and "subsection_col" not in mapping:
                 mapping["subsection_col"] = col_idx
+                score += 1
 
-        if "question_col" in mapping:
-            return row_idx, mapping
+        if "question_col" in mapping and score > best_score:
+            best_score = score
+            best_result = (row_idx, mapping)
 
-    return None, {}
+    return best_result
 
 
 def _parse_excel(buf: io.BytesIO, filename: str) -> list[ExtractedItem]:
@@ -401,6 +433,8 @@ def _parse_excel(buf: io.BytesIO, filename: str) -> list[ExtractedItem]:
                     item_type=_classify_type(cleaned),
                     priority=_classify_priority(cleaned),
                     source_row=row_idx,
+                    sheet_name=sheet.title,
+                    source_col=col_map.get("response_col"),
                     raw_text=question_text,
                 ))
 
@@ -456,6 +490,8 @@ def _parse_excel(buf: io.BytesIO, filename: str) -> list[ExtractedItem]:
                     item_type=_classify_type(cleaned),
                     priority=_classify_priority(cleaned),
                     source_row=row_idx,
+                    sheet_name=sheet.title,
+                    source_col=None,  # unstructured sheet — export will append a new column
                     raw_text=question_text,
                 ))
 

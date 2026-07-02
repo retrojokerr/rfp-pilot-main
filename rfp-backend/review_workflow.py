@@ -17,8 +17,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+from io import BytesIO
+from pathlib import Path
+import re
+
+from fastapi.responses import StreamingResponse
+
 from database import engine
-from models import ReviewSubmission, ReviewItem, Notification
+from models import ReviewSubmission, ReviewItem, Notification, OriginalDocument
 from auth import require, current_user, User
 
 router = APIRouter(prefix="/review", tags=["review"])
@@ -45,6 +51,12 @@ class SubmissionIn(BaseModel):
     sheet_name: str
     items: list[ReviewItemIn]
     previous_submission_id: Optional[str] = None
+    # Phase 5: header text of the mapped columns in the original workbook.
+    # Optional so pre-Phase-5 clients still work; export requires them.
+    question_col_name: Optional[str] = None
+    availability_col_name: Optional[str] = None
+    remarks_col_name: Optional[str] = None
+    display_name: Optional[str] = None
 
 
 class ItemDecision(BaseModel):
@@ -76,6 +88,10 @@ def _serialize(sub: ReviewSubmission, items: list[ReviewItem]) -> dict:
         "reviewer_comment": sub.reviewer_comment,
         "previous_submission_id": sub.previous_submission_id,
         "cycle": sub.cycle,
+        "question_col_name": sub.question_col_name,
+        "availability_col_name": sub.availability_col_name,
+        "remarks_col_name": sub.remarks_col_name,
+        "display_name": sub.display_name,
         "items": [{
             "question_id": i.question_id,
             "question": i.question,
@@ -105,15 +121,24 @@ def create_submission(payload: SubmissionIn, user: User = Depends(require("gener
         raise HTTPException(400, "A submission needs at least one corrected or flagged answer")
     with Session(engine) as s:
         cycle = 1
+        prev: Optional[ReviewSubmission] = None
         prev_id = payload.previous_submission_id
         if prev_id:
             prev = s.get(ReviewSubmission, prev_id)
             if prev:
                 cycle = (prev.cycle or 1) + 1
+        # Phase 5: on a resubmission (cycle > 1), the resubmit UI may not
+        # re-send the column mapping — it's the same file. Inherit any
+        # missing col_names from the previous submission so the export
+        # endpoint has what it needs on the eventual approval.
         sub = ReviewSubmission(
             doc_id=payload.doc_id, sheet_name=payload.sheet_name,
             submitted_by=user.email, status="pending",
             previous_submission_id=prev_id, cycle=cycle,
+            question_col_name=payload.question_col_name or (prev.question_col_name if prev else None),
+            availability_col_name=payload.availability_col_name or (prev.availability_col_name if prev else None),
+            remarks_col_name=payload.remarks_col_name or (prev.remarks_col_name if prev else None),
+            display_name=payload.display_name or (prev.display_name if prev else None),
         )
         s.add(sub)
         s.flush()
@@ -236,6 +261,144 @@ def send_back_submission(submission_id: str, payload: SendBackIn, user: User = D
                 f"/my-submissions?submission={sub.id}")
         s.commit()
         return {"status": "sent_back", "submission_id": sub.id}
+
+
+def _safe_filename_stem(name: str) -> str:
+    """Sanitize a user-provided string for use as a filename stem.
+
+    Keeps letters, digits, spaces, hyphens, underscores, dots. Replaces
+    everything else with underscore. Collapses whitespace runs. Strips
+    leading/trailing whitespace and dots (some filesystems reject trailing
+    dots). Returns 'export' if the result is empty.
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9 \-_.]", "_", name)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    return cleaned or "export"
+
+
+def _normalise_q(text: str) -> str:
+    """Match the frontend exporter.ts normalise(): lowercase, collapse whitespace,
+    trim, truncate to 200 chars. Same on both sides so lookups agree."""
+    return re.sub(r"\s+", " ", (text or "").lower().strip())[:200]
+
+
+@router.get("/submissions/{submission_id}/export")
+def export_submission(submission_id: str, user: User = Depends(current_user)):
+    """
+    Phase 5: reopen the persisted original workbook and write approved
+    availability + remarks into the mapped columns, preserving all other
+    cells, formulas, formatting, and untouched sheets.
+
+    Row-matching mirrors the frontend exporter.ts: normalise question text
+    (lowercase, collapse whitespace, truncate to 200) and look up against
+    ReviewItem.question. First cell match wins.
+
+    Access: the submitter of the submission, or any reviewer/admin.
+    Only approved submissions are exportable.
+    """
+    with Session(engine) as s:
+        sub = s.get(ReviewSubmission, submission_id)
+        if not sub:
+            raise HTTPException(404, "Submission not found")
+        if sub.submitted_by != user.email and user.role not in ("reviewer", "admin"):
+            raise HTTPException(403, "Not your submission")
+        if sub.status != "approved":
+            raise HTTPException(400, f"Only approved submissions can be exported (this one is {sub.status})")
+        if not (sub.question_col_name and sub.availability_col_name and sub.remarks_col_name):
+            raise HTTPException(
+                409,
+                "This submission was created before write-back mapping was captured. "
+                "Please re-upload the sheet, map your columns, and resubmit for review.",
+            )
+        original = s.get(OriginalDocument, sub.doc_id)
+        if not original:
+            raise HTTPException(
+                409,
+                "Original file no longer available. Please re-upload the sheet and resubmit.",
+            )
+        items = s.exec(select(ReviewItem).where(ReviewItem.submission_id == sub.id)).all()
+
+    # openpyxl is imported lazily so unrelated endpoints don't pay the cost.
+    import openpyxl
+
+    wb = openpyxl.load_workbook(BytesIO(original.content))
+    if sub.sheet_name not in wb.sheetnames:
+        raise HTTPException(409, f"Sheet '{sub.sheet_name}' not found in the original workbook.")
+    ws = wb[sub.sheet_name]
+
+    # Locate the three mapped columns by exact header text (case-sensitive to
+    # avoid false positives; the frontend captures the header text verbatim).
+    q_col = a_col = r_col = None
+    header_row = None
+    for row_idx in range(1, min(9, (ws.max_row or 0) + 1)):
+        for col_idx in range(1, (ws.max_column or 0) + 1):
+            v = ws.cell(row=row_idx, column=col_idx).value
+            if v is None:
+                continue
+            txt = str(v).strip()
+            if q_col is None and txt == sub.question_col_name:
+                q_col = col_idx
+                header_row = row_idx
+            if a_col is None and txt == sub.availability_col_name:
+                a_col = col_idx
+                header_row = row_idx
+            if r_col is None and txt == sub.remarks_col_name:
+                r_col = col_idx
+                header_row = row_idx
+        if q_col and a_col and r_col:
+            break
+
+    missing = []
+    if not q_col: missing.append(sub.question_col_name)
+    if not a_col: missing.append(sub.availability_col_name)
+    if not r_col: missing.append(sub.remarks_col_name)
+    if missing:
+        raise HTTPException(
+            409,
+            f"Column headers not found in the original sheet: {missing}. "
+            "The file may have been modified since submission.",
+        )
+
+    # Build the lookup once.
+    resp_map: dict[str, tuple[str, str]] = {}
+    for it in items:
+        avail = it.availability or ""
+        remarks = it.corrected_answer or it.answer or ""
+        resp_map[_normalise_q(it.question)] = (avail, remarks)
+
+    # Walk data rows and write cells.
+    injected = 0
+    start = (header_row or 1) + 1
+    for row_idx in range(start, (ws.max_row or 0) + 1):
+        v = ws.cell(row=row_idx, column=q_col).value
+        if v is None:
+            continue
+        key = _normalise_q(str(v))
+        match = resp_map.get(key)
+        if not match:
+            continue
+        avail, remarks = match
+        ws.cell(row=row_idx, column=a_col).value = avail
+        ws.cell(row=row_idx, column=r_col).value = remarks
+        injected += 1
+
+    out = BytesIO()
+    wb.save(out)
+    out.seek(0)
+
+    # Prefer the user-provided display name for a nicer download filename.
+    # Fall back to the uploaded file's own name for legacy submissions.
+    stem = _safe_filename_stem(sub.display_name) if sub.display_name else (Path(original.filename).stem or "export")
+    filename = f"{stem}_answered.xlsx"
+    return StreamingResponse(
+        out,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Items-Total": str(len(items)),
+            "X-Items-Written": str(injected),
+        },
+    )
 
 
 # ── Notifications (in-app) ────────────────────────────────────────────────────

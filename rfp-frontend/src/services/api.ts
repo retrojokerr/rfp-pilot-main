@@ -324,6 +324,7 @@ export interface ReviewSubmission {
   reviewer_comment: string | null
   previous_submission_id?: string | null
   cycle?: number
+  display_name?: string | null
   items: ReviewItem[]
   counts: { total: number; corrected: number; flagged: number; accepted: number }
 }
@@ -340,9 +341,86 @@ export async function createSubmission(payload: {
   sheet_name: string
   items: ReviewItemPayload[]
   previous_submission_id?: string
+  // Phase 5: header text of the mapped columns in the original workbook.
+  // The backend export endpoint uses these to locate write-back targets.
+  question_col_name?: string
+  availability_col_name?: string
+  remarks_col_name?: string
+  display_name?: string
 }): Promise<ReviewSubmission> {
   const { data } = await api.post('/review/submissions', payload)
   return data
+}
+
+// ── Phase 5: raw-bytes upload for the export write-back path ─────────────────
+export interface UploadDocumentResult {
+  doc_id: string
+  status: 'stored' | 'already_stored'
+  bytes: number
+  filename: string
+}
+
+export async function uploadRawDocument(
+  docId: string,
+  buffer: ArrayBuffer,
+  filename: string,
+): Promise<UploadDocumentResult> {
+  const form = new FormData()
+  const blob = new Blob([buffer], { type: 'application/octet-stream' })
+  form.append('file', blob, filename)
+  form.append('doc_id', docId)
+  // The axios instance defaults to Content-Type: application/json. If we
+  // don't override it here, axios JSON-stringifies the FormData (arriving
+  // at the backend as an empty JSON body). Setting multipart/form-data
+  // tells axios to serialize as multipart and auto-generate the boundary.
+  const { data } = await api.post('/documents/upload', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return data
+}
+
+// Phase 5: fetch the answered xlsx for a submission and trigger a browser
+// download. Uses the filename the backend puts in Content-Disposition;
+// falls back to a name derived from the submission's display/sheet name.
+// On error, tries to unpack the JSON detail out of the error blob so the
+// caller can surface a useful toast instead of "Request failed".
+export async function downloadAnsweredSheet(
+  submissionId: string,
+  fallbackName?: string,
+): Promise<void> {
+  try {
+    const res = await api.get(`/review/submissions/${submissionId}/export`, {
+      responseType: 'blob',
+    })
+    const dispo: string = res.headers['content-disposition'] || ''
+    const match = /filename="?([^";]+)"?/.exec(dispo)
+    const filename = match?.[1] || `${fallbackName || submissionId}_answered.xlsx`
+
+    const url = URL.createObjectURL(res.data as Blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  } catch (err: any) {
+    // With responseType: 'blob', axios wraps error bodies as Blobs too.
+    // Try to pull out {"detail": "..."} for a useful message.
+    let msg = 'Download failed'
+    const data = err?.response?.data
+    if (data instanceof Blob) {
+      try {
+        const parsed = JSON.parse(await data.text())
+        if (parsed?.detail) msg = parsed.detail
+      } catch {
+        /* fall through — keep generic msg */
+      }
+    } else if (err?.message) {
+      msg = err.message
+    }
+    throw new Error(msg)
+  }
 }
 
 export async function listSubmissions(): Promise<ReviewSubmission[]> {

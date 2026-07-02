@@ -9,7 +9,7 @@ import {
 import { toast } from 'sonner'
 import { cn, formatRelativeTime } from '@/utils/helpers'
 import {
-  listSubmissions, getSubmission, createSubmission,
+  listSubmissions, getSubmission, createSubmission, downloadAnsweredSheet,
   type ReviewSubmission, type ReviewItem, type ReviewItemPayload,
 } from '@/services/api'
 
@@ -47,7 +47,7 @@ function buildLineages(subs: ReviewSubmission[]): Lineage[] {
     }
     return {
       key: head.id,
-      sheetName: head.sheet_name,
+      sheetName: head.display_name || head.sheet_name,
       current: chain[0],
       history: chain.slice(1),
     }
@@ -267,7 +267,7 @@ function MySubmissionDetail({ id, readOnly = false, onBack }: { id: string; read
 
       <div className="flex items-center gap-2 mb-1">
         <FileText className="w-5 h-5 text-zinc-400" />
-        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">{sub.sheet_name}</h1>
+        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">{sub.display_name || sub.sheet_name}</h1>
         <span className={cn('text-xs px-1.5 py-0.5 rounded-md font-medium', st.bg, st.color)}>{st.label}</span>
       </div>
       <p className="text-sm text-zinc-500 mb-6">
@@ -276,13 +276,28 @@ function MySubmissionDetail({ id, readOnly = false, onBack }: { id: string; read
         {(sub.cycle ?? 1) > 1 && ` · cycle ${sub.cycle}`}
       </p>
 
-      {/* Approved: success + export */}
+      {/* Approved: success + faithful export */}
       {isApproved && (
         <div className="rounded-xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50/50 dark:bg-emerald-950/20 p-4 mb-6">
-          <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-400 text-sm font-medium">
-            <CheckCircle2 className="w-4 h-4" /> Approved — corrections added to the knowledge base
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-400 text-sm font-medium">
+                <CheckCircle2 className="w-4 h-4" /> Approved — corrections added to the knowledge base
+              </div>
+              <p className="text-xs text-zinc-500 mt-1">Original layout preserved. Only the answer columns are filled.</p>
+            </div>
+            <button
+              onClick={async () => {
+                try {
+                  await downloadAnsweredSheet(sub.id, sub.display_name || sub.sheet_name)
+                } catch (e: any) {
+                  toast.error(e?.message || 'Download failed')
+                }
+              }}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium shrink-0">
+              <Download className="w-4 h-4" /> Download answered sheet
+            </button>
           </div>
-          <p className="text-xs text-zinc-500 mt-1">Faithful export (original layout preserved) is coming soon.</p>
         </div>
       )}
 

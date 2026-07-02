@@ -16,7 +16,8 @@ import { startGeneration, stopGeneration, resetGeneration } from '@/stores/gener
 import { exportToOriginalWorkbook, exportSheetAsNewWorkbook } from '@/utils/exporter'
 import { useReviewStore } from '@/stores/reviewStore'
 import { useFeedbackStore } from '@/stores/feedbackStore'
-import { generateAnswer, parseApiError, ingestCorrection, createSubmission, type ReviewItemPayload, type ReviewFlagType } from '@/services/api'
+import { generateAnswer, parseApiError, ingestCorrection, createSubmission, uploadRawDocument, type ReviewItemPayload, type ReviewFlagType } from '@/services/api'
+import { getRawBuffer } from '@/stores/bufferStore'
 import type { GeneratedResponse, AvailabilityLabel } from '@/types'
 
 const AVAIL_OPTIONS: AvailabilityLabel[] = ['Yes', 'No', 'Partial', 'Unknown']
@@ -90,12 +91,56 @@ export default function GenerateStep() {
         availability: r.availability,
       }
     })
+    // Phase 5: pick the sheet the user actually mapped, not workbook.activeSheet.
+    // activeSheet tracks whichever tab was clicked last in MappingStep, so it
+    // drifts if the user goes back to view another sheet after generating.
+    // MappingStep's gate ensures the sheet-under-work has all three roles
+    // assigned, so we resolve by completeness of mapping.
+    const mappedSheet = workbook.sheets.find((s) => {
+      const roles = new Set(s.columns.map((c) => c.role))
+      return roles.has('question') && roles.has('availability_out') && roles.has('remarks_out')
+    })
+    if (!mappedSheet) {
+      toast.error('Column mappings missing', {
+        description: 'Go back to Map columns and assign Question, → Yes/No/Partial, and → Remarks.',
+      })
+      return
+    }
+    const sheetName = mappedSheet.name
+    const questionCol = mappedSheet.columns.find((c) => c.role === 'question')!
+    const availCol = mappedSheet.columns.find((c) => c.role === 'availability_out')!
+    const remarksCol = mappedSheet.columns.find((c) => c.role === 'remarks_out')!
+
+    const docId = wizard.currentRfiId || workbook.filename
     setSubmitting(true)
     try {
+      // Phase 5: persist the raw workbook bytes so the reviewer/submitter can
+      // download an answered version after approval. Idempotent — repeats
+      // for the same docId are no-ops on the backend.
+      const rawBuffer = getRawBuffer()
+      if (rawBuffer) {
+        try {
+          await uploadRawDocument(docId, rawBuffer, workbook.filename)
+        } catch (uploadErr) {
+          toast.error('Could not persist workbook for export', {
+            description: parseApiError(uploadErr),
+          })
+          setSubmitting(false)
+          return
+        }
+      }
+      // If rawBuffer is missing (e.g. hard refresh mid-session), the backend
+      // may already have the bytes from a prior submission with the same
+      // docId. Export will 409 if not, with a clear message.
+
       const sub = await createSubmission({
-        doc_id: wizard.currentRfiId || workbook.filename,
-        sheet_name: workbook.filename,
+        doc_id: docId,
+        sheet_name: sheetName,
         items,
+        question_col_name: questionCol.name,
+        availability_col_name: availCol.name,
+        remarks_col_name: remarksCol.name,
+        display_name: wizard.displayName || undefined,
       })
       toast.success('Sent for review', {
         description: `${sub.counts.corrected} corrected · ${sub.counts.flagged} flagged · ${sub.counts.accepted} accepted`,

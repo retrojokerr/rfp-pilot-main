@@ -20,6 +20,10 @@ interface WizardStore {
   currentRfiId: string | null
   setCurrentRfiId: (id: string | null) => void
 
+  // User-provided display name for this RFP (captured at upload time)
+  displayName: string | null
+  setDisplayName: (name: string | null) => void
+
   // Workbook
   workbook: WorkbookData | null
   setWorkbook: (wb: WorkbookData) => void
@@ -69,6 +73,7 @@ interface WizardStore {
 const initialState = {
   step: 'upload' as WizardStep,
   currentRfiId: null as string | null,
+  displayName: null as string | null,
   workbook: null,
   activeSheet: '',
   items: [],
@@ -87,6 +92,8 @@ export const useWizardStore = create<WizardStore>()(
       setStep: (step) => set({ step }),
 
       setCurrentRfiId: (currentRfiId) => set({ currentRfiId }),
+
+      setDisplayName: (displayName) => set({ displayName }),
 
       setWorkbook: (workbook) => set({
         workbook,

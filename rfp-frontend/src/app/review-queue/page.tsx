@@ -3,14 +3,14 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { motion } from 'framer-motion'
 import {
-  CheckCircle2, XCircle, Clock, Search, FileText,
+  CheckCircle2, XCircle, Clock, Search, FileText, Download,
   ChevronRight, ArrowLeft, Edit2, AlertTriangle, RefreshCw, Send,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn, formatRelativeTime } from '@/utils/helpers'
 import { useSessionStore } from '@/stores/sessionStore'
 import {
-  listSubmissions, getSubmission, approveSubmission, sendBackSubmission,
+  listSubmissions, getSubmission, approveSubmission, sendBackSubmission, downloadAnsweredSheet,
   type ReviewSubmission, type ReviewItem, type ItemDecisionPayload,
 } from '@/services/api'
 
@@ -82,6 +82,7 @@ export default function ReviewQueuePage() {
     const q = search.toLowerCase()
     return latest.filter(s =>
       s.sheet_name.toLowerCase().includes(q) ||
+      (s.display_name?.toLowerCase().includes(q) ?? false) ||
       s.submitted_by.toLowerCase().includes(q))
   }, [submissions, search])
 
@@ -140,7 +141,7 @@ export default function ReviewQueuePage() {
                   <div className="flex items-center gap-2 min-w-0">
                     <FileText className="w-4 h-4 text-zinc-400 shrink-0" />
                     <span className="font-medium text-zinc-900 dark:text-zinc-100 truncate">
-                      {sub.sheet_name}
+                      {sub.display_name || sub.sheet_name}
                     </span>
                     <span className={cn('text-xs px-1.5 py-0.5 rounded-md font-medium', st.bg, st.color)}>
                       {st.label}
@@ -277,7 +278,7 @@ function SubmissionDetail({ id, canApprove, onBack }: {
 
       <div className="flex items-center gap-2 mb-1">
         <FileText className="w-5 h-5 text-zinc-400" />
-        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">{sub.sheet_name}</h1>
+        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">{sub.display_name || sub.sheet_name}</h1>
         <span className={cn('text-xs px-1.5 py-0.5 rounded-md font-medium', st.bg, st.color)}>{st.label}</span>
       </div>
       <p className="text-sm text-zinc-500 mb-6">
@@ -330,6 +331,26 @@ function SubmissionDetail({ id, canApprove, onBack }: {
               </button>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Phase 5: approved submissions get a Download answered sheet action */}
+      {sub.status === 'approved' && (
+        <div className="sticky bottom-0 mt-6 -mx-6 px-6 py-4 border-t border-zinc-200 dark:border-zinc-800 bg-white/90 dark:bg-zinc-950/90 backdrop-blur flex items-center justify-between">
+          <span className="text-xs text-zinc-500">
+            Original layout preserved. Only the answer columns are filled.
+          </span>
+          <button
+            onClick={async () => {
+              try {
+                await downloadAnsweredSheet(sub.id, sub.display_name || sub.sheet_name)
+              } catch (e: any) {
+                toast.error(e?.message || 'Download failed')
+              }
+            }}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium">
+            <Download className="w-4 h-4" /> Download answered sheet
+          </button>
         </div>
       )}
     </div>

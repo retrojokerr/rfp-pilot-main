@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Optional
 from datetime import datetime, timezone
 from sqlmodel import SQLModel, Field, Column
-from sqlalchemy import Text, JSON
+from sqlalchemy import Text, JSON, LargeBinary
 import uuid
 
 
@@ -87,6 +87,16 @@ class ReviewSubmission(SQLModel, table=True):
     reviewer_comment: Optional[str] = Field(default=None, sa_column=Column(Text))
     previous_submission_id: Optional[str] = Field(default=None, index=True)
     cycle: int = Field(default=1)  # 1 = first submission, increments on resubmit
+    # Phase 5: column-name pointers into the persisted OriginalDocument, so
+    # the export endpoint knows where to look up the question text and where
+    # to write availability + remarks values. Nullable — legacy submissions
+    # (created before Phase 5) have NULL here and can't be exported.
+    question_col_name: Optional[str] = None
+    availability_col_name: Optional[str] = None
+    remarks_col_name: Optional[str] = None
+    # Human-friendly RFP label the user provides at upload time. Optional —
+    # UI falls back to sheet_name when not set.
+    display_name: Optional[str] = None
 
 
 class ReviewItem(SQLModel, table=True):
@@ -106,6 +116,13 @@ class ReviewItem(SQLModel, table=True):
     comment: Optional[str] = Field(default=None, sa_column=Column(Text))
     confidence: Optional[float] = None
     availability: Optional[str] = None
+    # Positional metadata captured at parse time so the Phase-5 export endpoint
+    # can write each approved answer back into the *original* workbook at the
+    # exact (sheet, row, column) it came from. All nullable — legacy items
+    # (created before Phase 5) simply won't be write-back-eligible.
+    sheet_name: Optional[str] = None
+    source_row: Optional[int] = None
+    source_col: Optional[int] = None
 
 
 # ── Notifications (Phase 3) ───────────────────────────────────────────────────
@@ -120,3 +137,25 @@ class Notification(SQLModel, table=True):
     link: Optional[str] = None
     read: bool = Field(default=False)
     created_at: datetime = Field(default_factory=_now)
+
+
+# ── Original documents (Phase 5) ──────────────────────────────────────────────
+
+class OriginalDocument(SQLModel, table=True):
+    """
+    Raw bytes of an uploaded workbook, keyed by doc_id. Populated at upload
+    time; read by the review-workflow export endpoint to write approved
+    answers back into the original sheet structure (sections, subsections,
+    formatting, multi-sheet layout) instead of building a summary workbook.
+
+    Kept in Postgres (bytea) for now — pilot-scale RFP files are typically
+    1-5 MB; swap for S3 later behind the same doc_id key if files grow.
+    """
+    __tablename__ = "original_documents"
+
+    doc_id: str = Field(primary_key=True)
+    filename: str
+    content_type: str          # "xlsx" | "xls" | "csv"
+    content: bytes = Field(sa_column=Column(LargeBinary))
+    uploaded_by: str           # email
+    uploaded_at: datetime = Field(default_factory=_now)

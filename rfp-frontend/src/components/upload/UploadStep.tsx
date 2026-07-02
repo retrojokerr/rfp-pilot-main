@@ -27,10 +27,13 @@ const SAMPLE_DATA = [
 ]
 
 export default function UploadStep() {
-  const { setWorkbook, setItems, setStep, clearResponses, clearSelection } = useWizardStore()
+  const { setWorkbook, setItems, setStep, clearResponses, clearSelection, setDisplayName } = useWizardStore()
   const [status, setStatus] = useState<'idle' | 'parsing' | 'done' | 'error'>('idle')
   const [filename, setFilename] = useState('')
   const [error, setError] = useState('')
+  // Draft name shown in the "Name this RFP" input after successful parse.
+  // Pre-filled from the file name minus its extension; the user edits or accepts.
+  const [draftName, setDraftName] = useState('')
 
   const processFile = useCallback(async (buffer: ArrayBuffer, name: string) => {
     setStatus('parsing')
@@ -71,12 +74,14 @@ export default function UploadStep() {
         })
       }
 
+      // Pre-fill the RFP name from the file name minus extension. User
+      // will confirm or edit before advancing to Map columns.
+      setDraftName(name.replace(/\.(xlsx?|csv)$/i, ''))
       setStatus('done')
       toast.success(`Parsed ${workbook.sheets.length} sheet(s)`, {
-        description: `Ready to map columns`,
+        description: `Give this RFP a name, then map columns`,
       })
-
-      setTimeout(() => setStep('map'), 600)
+      // No auto-advance — user drives the transition below.
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to parse file'
       setError(msg)
@@ -178,12 +183,40 @@ export default function UploadStep() {
           )}
 
           {status === 'done' && (
-            <motion.div key="done" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}>
+            <motion.div key="done" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}>
               <div className="w-14 h-14 rounded-2xl bg-emerald-500/10 flex items-center justify-center mx-auto mb-4">
                 <CheckCircle2 className="w-6 h-6 text-emerald-500" />
               </div>
-              <p className="text-base font-medium text-emerald-600 dark:text-emerald-400">File parsed successfully!</p>
-              <p className="text-sm text-muted-foreground mt-1">Redirecting to column mapping...</p>
+              <p className="text-base font-medium text-emerald-600 dark:text-emerald-400 mb-1">File parsed successfully!</p>
+              <p className="text-sm text-muted-foreground mb-4">Give this RFP a name so you can find it later</p>
+              <input
+                type="text"
+                value={draftName}
+                onChange={(e) => setDraftName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && draftName.trim()) {
+                    setDisplayName(draftName.trim())
+                    setStep('map')
+                  }
+                }}
+                onClick={(e) => e.stopPropagation()}
+                placeholder="e.g. Acme Corp DSPM RFP — Q3 2026"
+                className="block w-full max-w-md mx-auto px-3 py-2 rounded-lg border border-border bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
+                autoFocus
+              />
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  if (!draftName.trim()) return
+                  setDisplayName(draftName.trim())
+                  setStep('map')
+                }}
+                disabled={!draftName.trim()}
+                className="mt-3 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium disabled:opacity-50"
+              >
+                Continue to map columns →
+              </button>
             </motion.div>
           )}
 

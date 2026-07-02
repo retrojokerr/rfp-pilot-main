@@ -25,7 +25,27 @@ export default function MappingStep() {
   const [assignMode, setAssignMode] = useState<AssignMode>('question')
 
   const sheet = workbook?.sheets.find((s) => s.name === activeSheet)
+
+  // Phase 5: the Continue gate looks across ALL sheets in the workbook.
+  // The user only needs ONE sheet fully mapped (Question + →Yes/No/Partial +
+  // →Remarks) to proceed; which tab they're viewing when they click doesn't
+  // matter. handleContinue below extracts items from the fully-mapped sheet.
+  const mappedSheet = workbook?.sheets.find((s) => {
+    const roles = new Set(s.columns.map((c) => c.role))
+    return roles.has('question') && roles.has('availability_out') && roles.has('remarks_out')
+  })
+  const canContinue = !!mappedSheet
+
+  // Per-tab hint for the currently-viewed sheet (still useful — shows the
+  // user what's missing on the sheet they're looking at right now).
   const hasQuestion = sheet?.columns.some((c) => c.role === 'question') ?? false
+  const hasAvailabilityOut = sheet?.columns.some((c) => c.role === 'availability_out') ?? false
+  const hasRemarksOut = sheet?.columns.some((c) => c.role === 'remarks_out') ?? false
+  const missingRoles = [
+    !hasQuestion && 'Question',
+    !hasAvailabilityOut && '→ Yes/No/Partial',
+    !hasRemarksOut && '→ Remarks',
+  ].filter(Boolean) as string[]
 
   function handleColClick(col: SheetColumn) {
     if (!assignMode || !activeSheet) return
@@ -33,8 +53,13 @@ export default function MappingStep() {
   }
 
   function handleContinue() {
-    if (!sheet) return
-    const items = extractItemsFromSheet(sheet)
+    // Phase 5: prefer the fully-mapped sheet regardless of which tab is open.
+    const target = mappedSheet ?? sheet
+    if (!target) return
+    // Also nudge activeSheet so the review shows the sheet whose items are
+    // in play — keeps downstream steps and store state consistent.
+    if (target.name !== activeSheet) setActiveSheet(target.name)
+    const items = extractItemsFromSheet(target)
     setItems(items)
     setStep('select')
   }
@@ -201,19 +226,26 @@ export default function MappingStep() {
         >
           ← Back
         </button>
-        <button
-          onClick={handleContinue}
-          disabled={!hasQuestion}
-          className={cn(
-            'flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium transition-all',
-            hasQuestion
-              ? 'bg-primary text-primary-foreground hover:opacity-90'
-              : 'bg-muted text-muted-foreground cursor-not-allowed'
+        <div className="flex flex-col items-end gap-2">
+          {missingRoles.length > 0 && (
+            <p className="text-xs text-muted-foreground">
+              Still to assign: <span className="font-medium text-foreground">{missingRoles.join(', ')}</span>
+            </p>
           )}
-        >
-          Select questions
-          <ChevronRight className="w-4 h-4" />
-        </button>
+          <button
+            onClick={handleContinue}
+            disabled={!canContinue}
+            className={cn(
+              'flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium transition-all',
+              canContinue
+                ? 'bg-primary text-primary-foreground hover:opacity-90'
+                : 'bg-muted text-muted-foreground cursor-not-allowed'
+            )}
+          >
+            Select questions
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        </div>
       </div>
     </div>
   )
