@@ -214,9 +214,23 @@ function SubmissionDetail({ id, canApprove, onBack }: {
   }
 
   const handleApprove = async () => {
+    // Collect reviewer edits so the KB and export reflect the reviewer's
+    // improvements, not just what the submitter sent. Any item whose
+    // edited answer differs from what's stored gets sent through. The
+    // button is only rendered when no items are rejected (see gate
+    // below), so we can safely walk all items without excluding rejects.
+    const editsPayload: Record<string, string> = {}
+    for (const item of sub?.items ?? []) {
+      const qid = item.question_id
+      const original = (item.corrected_answer || item.answer || '').trim()
+      const edited = (edits[qid] ?? '').trim()
+      if (edited && edited !== original) {
+        editsPayload[qid] = edited
+      }
+    }
     setBusy(true)
     try {
-      const res = await approveSubmission(id)
+      const res = await approveSubmission(id, { edits: editsPayload })
       toast.success(`Approved — ${res.ingested} correction(s) added to knowledge base`)
       onBack()
     } catch {

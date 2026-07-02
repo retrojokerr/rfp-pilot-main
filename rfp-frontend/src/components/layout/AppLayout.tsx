@@ -12,6 +12,7 @@ import { useTheme } from 'next-themes'
 import { useState, useEffect } from 'react'
 import { cn } from '@/utils/helpers'
 import { useReviewStore, setReviewActor } from '@/stores/reviewStore'
+import { listSubmissions } from '@/services/api'
 import { useSessionStore } from '@/stores/sessionStore'
 import { canAccessRoute, homeRouteFor } from '@/utils/access'
 import { BrandLogo } from '@/components/layout/BrandLogo'
@@ -53,6 +54,13 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const { data: session } = useSession()
   const responses = useReviewStore((s) => s.responses)
   const needsReview = responses.filter((r) => r.status === 'needs_review').length
+
+  // Sidebar Review Queue badge should reflect actual pending submissions
+  // in the DB, not wizard-local "needs_review" flags. Refetch on route
+  // change so approving/sending-back anywhere in the app updates the badge
+  // without a hard refresh. Errors are silently swallowed — the badge is
+  // decorative; a broken fetch shouldn't break layout render.
+  const [pendingSubmissionCount, setPendingSubmissionCount] = useState(0)
   const me = useSessionStore((s) => s.me)
   const loadMe = useSessionStore((s) => s.load)
   useEffect(() => { if (session?.user) loadMe() }, [session?.user, loadMe])
@@ -78,6 +86,20 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       useReviewStore.persist?.rehydrate?.()
     }
   }, [session?.user])
+
+  // Refetch pending-submission count on every route change. Cheap request;
+  // keeps the sidebar badge honest without adding a store or push channel.
+  // No `me` guard — with AUTH_DISABLED backend accepts unauthed reads, and
+  // in prod the axios 401-retry-with-token handles auth. .catch() below
+  // swallows any residual auth failure and just leaves the badge as-is.
+  useEffect(() => {
+    listSubmissions()
+      .then((subs) => {
+        const pending = subs.filter((s) => s.status === 'pending').length
+        setPendingSubmissionCount(pending)
+      })
+      .catch(() => { /* badge stays as-is on error */ })
+  }, [pathname])
 
   useEffect(() => { setMounted(true) }, [])
 
@@ -115,7 +137,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
                   if (adminOnly && me && me.role !== 'admin') return null
                   if (me && !canAccessRoute(me.role, href)) return null
                   const active = pathname === href || pathname?.startsWith(href + '/')
-                  const badgeCount = badge ? needsReview : 0
+                  const badgeCount = badge ? pendingSubmissionCount : 0
                   return (
                     <Link key={href} href={href} onClick={() => setMobileOpen(false)}
                       className={cn('sidebar-item', active && 'active')}>

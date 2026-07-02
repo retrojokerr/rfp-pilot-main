@@ -50,9 +50,33 @@ function parseSheet(ws: XLSX.WorkSheet, name: string): SheetData {
 
   const headerRowIdx = findHeaderRow(raw)
   const headerRow = raw[headerRowIdx] as string[]
-  const dataRows = raw.slice(headerRowIdx + 1).filter((r) =>
-    (r as string[]).some((c) => String(c ?? '').trim())
-  )
+
+  // Merged section-header banners: customer templates often merge a cell
+  // across multiple columns to render a section title as a full-width row
+  // ("Data Discovery and Classification"). We must not extract these as
+  // questions — the AI would generate answers for section labels, and
+  // the export can't write to merged cells anyway. Read ws['!merges'] and
+  // build the set of raw-row indices covered by any horizontal merge.
+  const range = XLSX.utils.decode_range(ws['!ref'] ?? 'A1')
+  const startRow = range.s.r  // 0-indexed sheet row where raw[0] lives
+  const merges = (ws['!merges'] ?? []) as XLSX.Range[]
+  const bannerRawIdx = new Set<number>()
+  for (const m of merges) {
+    if (m.e.c > m.s.c) {  // horizontal span → banner
+      for (let r = m.s.r; r <= m.e.r; r++) {
+        bannerRawIdx.add(r - startRow)
+      }
+    }
+  }
+
+  const dataRows: unknown[][] = []
+  for (let i = headerRowIdx + 1; i < raw.length; i++) {
+    if (bannerRawIdx.has(i)) continue  // skip section banners
+    const row = raw[i] as string[]
+    if (row.some((c) => String(c ?? '').trim())) {
+      dataRows.push(row)
+    }
+  }
 
   // Detect question column: prefer header keyword match, else longest avg content
   let questionColIdx = -1

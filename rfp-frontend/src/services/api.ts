@@ -433,8 +433,11 @@ export async function getSubmission(id: string): Promise<ReviewSubmission> {
   return data
 }
 
-export async function approveSubmission(id: string): Promise<{ status: string; ingested: number }> {
-  const { data } = await api.post(`/review/submissions/${id}/approve`)
+export async function approveSubmission(
+  id: string,
+  payload?: { edits?: Record<string, string> },
+): Promise<{ status: string; ingested: number }> {
+  const { data } = await api.post(`/review/submissions/${id}/approve`, payload ?? {})
   return data
 }
 
@@ -467,4 +470,21 @@ export async function markNotificationRead(id: string): Promise<void> {
 
 export async function markAllNotificationsRead(): Promise<void> {
   await api.post('/review/notifications/read-all')
+}
+
+// ── Dashboard stats (server-computed, honest metrics) ────────
+export interface DashboardStats {
+  rfps_processed: number
+  in_review: number
+  completed: number
+  days_saved: number
+  hours_saved: number
+  median_review_minutes: number
+  avg_confidence: number
+  assumptions: { manual_hours_per_rfp: number; generation_hours_per_rfp: number }
+}
+
+export async function fetchDashboardStats(): Promise<DashboardStats> {
+  const { data } = await api.get('/review/dashboard-stats')
+  return data
 }

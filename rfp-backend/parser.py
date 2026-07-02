@@ -379,8 +379,30 @@ def _parse_excel(buf: io.BytesIO, filename: str) -> list[ExtractedItem]:
             ss_col  = col_map.get("subsection_col")
             skip    = col_map.get("skip_cols", set())
 
+            # Pre-compute the set of rows whose cells are inside a
+            # horizontal merge (spans multiple columns). These are section
+            # banners in the template, not question rows — skip them here
+            # rather than extracting phantom "questions" from section titles.
+            # Also capture the banner text so we can adopt it as the current
+            # section going forward when a section column isn't mapped.
+            banner_text_by_row: dict[int, str] = {}
+            for mr in sheet.merged_cells.ranges:
+                if mr.max_col > mr.min_col:  # horizontal span
+                    # openpyxl's merged range keeps the value at the top-left.
+                    banner = _safe_str(sheet.cell(row=mr.min_row, column=mr.min_col).value)
+                    for row in range(mr.min_row, mr.max_row + 1):
+                        banner_text_by_row[row] = banner
+
             for row_idx, row in enumerate(sheet.iter_rows(values_only=True), start=1):
                 if row_idx <= header_row:
+                    continue
+
+                # Merged banner row → treat as section header, don't extract.
+                if row_idx in banner_text_by_row:
+                    banner = banner_text_by_row[row_idx]
+                    if banner and s_col is None:
+                        # No dedicated section column — the banner IS the section.
+                        current_section = banner
                     continue
 
                 cells = [_safe_str(c) for c in row]
@@ -442,12 +464,27 @@ def _parse_excel(buf: io.BytesIO, filename: str) -> list[ExtractedItem]:
             # ── Fallback: single-column or unstructured sheet ──
             current_section = sheet.title
 
+            # Same merged-banner treatment as the structured branch: rows
+            # inside a horizontal merge are section titles, not questions.
+            banner_text_by_row: dict[int, str] = {}
+            for mr in sheet.merged_cells.ranges:
+                if mr.max_col > mr.min_col:
+                    banner = _safe_str(sheet.cell(row=mr.min_row, column=mr.min_col).value)
+                    for row in range(mr.min_row, mr.max_row + 1):
+                        banner_text_by_row[row] = banner
+
             # If sheet has only 1 non-empty column, treat every row as a requirement
             all_rows = list(sheet.iter_rows(values_only=True))
             col_counts = [sum(1 for r in all_rows if r[i] is not None) for i in range(sheet.max_column or 1)]
             is_single_col = sum(1 for c in col_counts if c > 0) <= 2
 
             for row_idx, row in enumerate(all_rows, start=1):
+                if row_idx in banner_text_by_row:
+                    banner = banner_text_by_row[row_idx]
+                    if banner:
+                        current_section = banner
+                    continue
+
                 cells = [_safe_str(c) for c in row]
                 non_empty = [c for c in cells if c]
                 if not non_empty:

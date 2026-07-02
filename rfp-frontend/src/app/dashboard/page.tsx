@@ -1,26 +1,19 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 
 import { motion } from 'framer-motion'
 import Link from 'next/link'
 import { ArrowRight, FileText, CheckCircle2, Clock, XCircle, AlertTriangle, Database, BarChart3, Upload, ChevronRight } from 'lucide-react'
-import { cn, formatRelativeTime, formatConfidence, isAnswered } from '@/utils/helpers'
-import { useReviewStore } from '@/stores/reviewStore'
-import { fetchKnowledgeStats, fetchSharedFeedback } from '@/services/api'
+import { cn, formatRelativeTime, formatConfidence } from '@/utils/helpers'
+import { fetchKnowledgeStats, fetchSharedFeedback, listSubmissions, fetchDashboardStats, type ReviewSubmission, type DashboardStats } from '@/services/api'
 import { GitBranch, FileStack } from 'lucide-react'
-import { useWizardStore } from '@/stores/wizardStore'
 
 const CONTAINER = { hidden: { opacity: 0 }, show: { opacity: 1, transition: { staggerChildren: 0.05 } } }
 const ITEM = { hidden: { opacity: 0, y: 10 }, show: { opacity: 1, y: 0, transition: { duration: 0.25 } } }
 
 export default function DashboardPage() {
-  // Use stable primitive selectors — never call functions inside selectors
-  const responses = useReviewStore((s) => s.responses)
-
   // SHARED org-wide stats — same numbers for every user (backend-sourced).
-  // The response stats below them are per-browser until review state moves
-  // server-side.
   const [shared, setShared] = useState<{ vectors: number; documents: number; corrections: number } | null>(null)
   useEffect(() => {
     let alive = true
@@ -37,30 +30,86 @@ export default function DashboardPage() {
     })
     return () => { alive = false }
   }, [])
-  const wizardItems = useWizardStore((s) => s.items)
 
-  // Compute derived stats in the component body (stable, memoized-like)
-  const total = responses.length
-  const generated = responses.filter((r) => isAnswered(r.status)).length
-  const needsReview = responses.filter((r) => r.status === 'needs_review').length
-  const approved = responses.filter((r) => r.status === 'approved').length
-  const rejected = responses.filter((r) => r.status === 'rejected').length
-  const exported = responses.filter((r) => r.status === 'exported').length
-  const lowConfidence = responses.filter((r) => (r.confidence?.score ?? 0) < 0.7).length
-  const scores = responses.map((r) => r.confidence?.score ?? 0).filter(Boolean)
-  const avgConfidence = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0
-  const stats = { total, generated, needsReview, approved, rejected, exported, lowConfidence, avgConfidence }
+  // Submissions — the source of truth for team-wide dashboard counters.
+  // Fetch once on mount; refetch happens implicitly when the user navigates
+  // away and back (component re-mounts).
+  const [subs, setSubs] = useState<ReviewSubmission[]>([])
+  useEffect(() => {
+    let alive = true
+    listSubmissions()
+      .then((s) => { if (alive) setSubs(s) })
+      .catch(() => { /* keep empty; UI renders "no submissions yet" */ })
+    return () => { alive = false }
+  }, [])
 
-  const recentResponses = responses.slice(-5).reverse()
-  const exportRate = total > 0 ? Math.round((exported / total) * 100) : 0
+  // Server-computed dashboard metrics (single source of truth).
+  const [dstats, setDstats] = useState<DashboardStats | null>(null)
+  useEffect(() => {
+    let alive = true
+    fetchDashboardStats()
+      .then((d) => { if (alive) setDstats(d) })
+      .catch(() => { /* tiles fall back to placeholders */ })
+    return () => { alive = false }
+  }, [])
+
+  // Format a duration in minutes into a human unit.
+  const fmtDuration = (min: number): string => {
+    if (min <= 0) return '—'
+    if (min < 60) return `${min < 10 ? min.toFixed(1) : Math.round(min)} min`
+    const hrs = min / 60
+    if (hrs < 24) return `${hrs.toFixed(1)} h`
+    return `${(hrs / 24).toFixed(1)} days`
+  }
+
+  // Flatten items across submissions once, tagging each with the parent
+  // submission's status/display info. All counters below iterate this list.
+  const items = useMemo(() =>
+    subs.flatMap((s) => s.items.map((it) => ({
+      key: `${s.id}:${it.question_id}`,
+      section: it.section || s.display_name || s.sheet_name,
+      question: it.question,
+      availability: it.availability || '—',
+      confidence: it.confidence ?? 0,
+      submittedAt: s.submitted_at,
+      subStatus: s.status,
+      flagType: it.flag_type,     // accepted | corrected | flagged | untouched
+      decision: it.decision,      // null | approved | rejected
+    }))),
+    [subs],
+  )
+
+  const stats = useMemo(() => {
+    const total = items.length
+    // Count by each item's OWN state, not its parent submission's status.
+    // accepted = AI answer shipped as-is; corrected/flagged = needed human
+    // attention; decision approved/rejected = the reviewer's per-item call.
+    const accepted = items.filter((it) => it.flagType === 'accepted').length
+    const corrections = items.filter((it) => it.flagType === 'corrected' || it.flagType === 'flagged').length
+    const approved = items.filter((it) => it.decision === 'approved').length
+    const rejected = items.filter((it) => it.decision === 'rejected').length
+    // "Awaiting review" = touched items still sitting in a pending submission.
+    const pending = items.filter((it) =>
+      it.subStatus === 'pending' && (it.flagType === 'corrected' || it.flagType === 'flagged')).length
+    const lowConfidence = items.filter((it) => it.confidence > 0 && it.confidence < 0.6).length
+    const scores = items.map((it) => it.confidence).filter((c) => c > 0)
+    const avgConfidence = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0
+    return { total, accepted, corrections, approved, rejected, pending, lowConfidence, avgConfidence }
+  }, [items])
+
+  const recentResponses = useMemo(() =>
+    [...items]
+      .sort((a, b) => (b.submittedAt ?? '').localeCompare(a.submittedAt ?? ''))
+      .slice(0, 5),
+    [items],
+  )
 
   const kpis = [
-    { label: 'Total Generated', value: stats.generated, icon: FileText, color: 'text-primary', link: '/workspace' },
-    { label: 'Needs Review', value: stats.needsReview, icon: Clock, color: 'text-amber-500', link: '/review-queue' },
-    { label: 'Approved', value: stats.approved, icon: CheckCircle2, color: 'text-emerald-500', link: '/review-queue' },
-    { label: 'Low Confidence', value: stats.lowConfidence, icon: AlertTriangle, color: 'text-orange-500', link: '/review-queue?filter=low_confidence' },
-    { label: 'Rejected', value: stats.rejected, icon: XCircle, color: 'text-red-500', link: '/review-queue' },
-    { label: 'Avg Confidence', value: stats.avgConfidence > 0 ? formatConfidence(stats.avgConfidence) : '—', icon: BarChart3, color: 'text-violet-500', link: '/workspace' },
+    { label: 'RFPs processed', value: dstats?.rfps_processed ?? '—', icon: FileText, color: 'text-primary', link: '/my-submissions' },
+    { label: 'In review', value: dstats?.in_review ?? '—', icon: Clock, color: 'text-amber-500', link: '/review-queue' },
+    { label: 'Time saved', value: dstats ? `${dstats.days_saved} days` : '—', icon: CheckCircle2, color: 'text-emerald-500', link: '/my-submissions' },
+    { label: 'Avg review time', value: dstats ? fmtDuration(dstats.median_review_minutes) : '—', icon: GitBranch, color: 'text-violet-500', link: '/review-queue' },
+    { label: 'Avg confidence', value: dstats && dstats.avg_confidence > 0 ? formatConfidence(dstats.avg_confidence) : '—', icon: BarChart3, color: 'text-violet-500', link: '/workspace' },
   ]
 
   const isEmpty = stats.total === 0
@@ -72,7 +121,7 @@ export default function DashboardPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Operations Dashboard</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            {isEmpty ? 'No responses yet — start by uploading an RFP in Workspace.' : `${stats.total} responses across ${wizardItems.length} questions`}
+            {isEmpty ? 'No responses yet — start by uploading an RFP in Workspace.' : `${stats.total} items across ${subs.length} submission${subs.length === 1 ? '' : 's'}`}
           </p>
         </div>
         <Link href="/workspace"
@@ -103,7 +152,7 @@ export default function DashboardPage() {
       {/* KPIs — your activity in this browser (review state is local until
           it moves server-side) */}
       <motion.div variants={CONTAINER} initial="hidden" animate="show"
-        className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
+        className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
         {kpis.map((kpi) => (
           <motion.div key={kpi.label} variants={ITEM}>
             <Link href={kpi.link}
@@ -117,6 +166,14 @@ export default function DashboardPage() {
           </motion.div>
         ))}
       </motion.div>
+
+      {dstats && (
+        <p className="text-2xs text-muted-foreground -mt-4">
+          Time saved assumes ~{dstats.assumptions.manual_hours_per_rfp}h to fill an RFP manually,
+          minus ~{dstats.assumptions.generation_hours_per_rfp}h generation. Review time is the median
+          from first submission to final approval. Both exclude abandoned uploads.
+        </p>
+      )}
 
       <div className="grid lg:grid-cols-3 gap-6">
 
@@ -135,22 +192,22 @@ export default function DashboardPage() {
             </div>
           ) : (
             <div className="divide-y divide-border">
-              {recentResponses.map((r, i) => {
-                const confLabel = r.confidence?.label ?? 'low'
+              {recentResponses.map((it, i) => {
+                const confLabel = it.confidence >= 0.8 ? 'high' : it.confidence >= 0.6 ? 'medium' : 'low'
                 return (
-                  <motion.div key={r.id} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.25 + i * 0.04 }}
+                  <motion.div key={it.key} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.25 + i * 0.04 }}
                     className="px-5 py-3 hover:bg-muted/30 transition-colors">
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex-1 min-w-0">
-                        {r.section && <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-0.5">{r.section}</p>}
-                        <p className="text-sm font-medium text-foreground truncate">{r.question}</p>
-                        <p className="text-xs text-muted-foreground mt-0.5">{r.availability} · {formatRelativeTime(r.generatedAt ?? new Date().toISOString())}</p>
+                        {it.section && <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-0.5">{it.section}</p>}
+                        <p className="text-sm font-medium text-foreground truncate">{it.question}</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">{it.availability} · {formatRelativeTime(it.submittedAt ?? new Date().toISOString())}</p>
                       </div>
                       <span className={cn('text-[10px] font-semibold px-2 py-0.5 rounded-full flex-shrink-0',
                         confLabel === 'high' ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400' :
                         confLabel === 'medium' ? 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400' :
                         'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400')}>
-                        {formatConfidence(r.confidence?.score ?? 0)}
+                        {formatConfidence(it.confidence)}
                       </span>
                     </div>
                   </motion.div>
@@ -172,9 +229,9 @@ export default function DashboardPage() {
             ) : (
               <div className="space-y-2">
                 {[
-                  { label: 'High (≥80%)', count: responses.filter(r => (r.confidence?.score ?? 0) >= 0.8).length, color: 'bg-emerald-500' },
-                  { label: 'Medium (60–80%)', count: responses.filter(r => { const s = r.confidence?.score ?? 0; return s >= 0.6 && s < 0.8 }).length, color: 'bg-amber-500' },
-                  { label: 'Low (<60%)', count: responses.filter(r => (r.confidence?.score ?? 0) < 0.6).length, color: 'bg-red-500' },
+                  { label: 'High (≥80%)', count: items.filter((it) => it.confidence >= 0.8).length, color: 'bg-emerald-500' },
+                  { label: 'Medium (60–80%)', count: items.filter((it) => it.confidence >= 0.6 && it.confidence < 0.8).length, color: 'bg-amber-500' },
+                  { label: 'Low (<60%)', count: items.filter((it) => it.confidence < 0.6).length, color: 'bg-red-500' },
                 ].map(({ label, count, color }) => (
                   <div key={label} className="flex items-center gap-2">
                     <div className="flex-1">
@@ -201,7 +258,7 @@ export default function DashboardPage() {
               {[
                 { href: '/workspace', label: 'Upload & generate', icon: Upload },
                 { href: '/assistant', label: 'Ask the AI assistant', icon: Database },
-                { href: '/review-queue', label: `Review queue (${stats.needsReview})`, icon: Clock },
+                { href: '/review-queue', label: `Review queue (${stats.pending})`, icon: Clock },
                 { href: '/knowledge', label: 'Manage knowledge base', icon: Database },
               ].map(({ href, label, icon: Icon }) => (
                 <Link key={href} href={href}

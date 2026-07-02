@@ -13,8 +13,8 @@ from __future__ import annotations
 from typing import Optional
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Body, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from io import BytesIO
@@ -24,7 +24,7 @@ import re
 from fastapi.responses import StreamingResponse
 
 from database import engine
-from models import ReviewSubmission, ReviewItem, Notification, OriginalDocument
+from models import ReviewSubmission, ReviewItem, Notification, OriginalDocument, FeedbackPair
 from auth import require, current_user, User
 
 router = APIRouter(prefix="/review", tags=["review"])
@@ -64,6 +64,13 @@ class ItemDecision(BaseModel):
     decision: str
     corrected_answer: Optional[str] = None
     comment: Optional[str] = None
+
+
+class ApproveIn(BaseModel):
+    # Per-item edits the reviewer made in the Review Queue. Keyed by
+    # question_id; any qid not present is approved as-submitted. Missing
+    # entirely = plain approve, no edits (matches historical behaviour).
+    edits: dict[str, str] = Field(default_factory=dict)
 
 
 class SendBackIn(BaseModel):
@@ -198,7 +205,11 @@ def get_submission(submission_id: str, user: User = Depends(current_user)):
 
 
 @router.post("/submissions/{submission_id}/approve")
-def approve_submission(submission_id: str, user: User = Depends(require("approve"))):
+def approve_submission(
+    submission_id: str,
+    payload: Optional[ApproveIn] = Body(default=None),
+    user: User = Depends(require("approve")),
+):
     with Session(engine) as s:
         sub = s.get(ReviewSubmission, submission_id)
         if not sub:
@@ -206,6 +217,24 @@ def approve_submission(submission_id: str, user: User = Depends(require("approve
         if sub.status != "pending":
             raise HTTPException(400, f"Submission is already {sub.status}")
         items = s.exec(select(ReviewItem).where(ReviewItem.submission_id == sub.id)).all()
+
+        # Apply reviewer edits BEFORE the ingest loop. An item the submitter
+        # marked "accepted" but that the reviewer improved becomes a
+        # correction — its flag_type gets promoted so the existing ingest
+        # gate picks it up, and the FeedbackPair write from patch 17
+        # naturally reflects the reviewer's improvement as good_answer.
+        if payload and payload.edits:
+            for it in items:
+                edit = (payload.edits.get(it.question_id) or "").strip()
+                if not edit:
+                    continue
+                original = (it.original_answer or it.answer or "").strip()
+                if edit == original:
+                    continue  # no-op edit, don't churn state
+                it.corrected_answer = edit
+                if it.flag_type == "accepted":
+                    it.flag_type = "corrected"
+
         ingested = 0
         for it in items:
             answer_to_ingest = it.corrected_answer or (it.answer if it.flag_type == "corrected" else None)
@@ -215,6 +244,30 @@ def approve_submission(submission_id: str, user: User = Depends(require("approve
                     ingest_correction(it.question, answer_to_ingest, it.section or "", "review_queue")
                     it.decision = "approved"
                     ingested += 1
+                    # Mirror the FeedbackPair write from /feedback/ingest so
+                    # this approved correction appears in the Feedback Loop
+                    # page (which reads feedback_pairs, not Qdrant). Same
+                    # gate as ingest_correction — if the KB got it, the
+                    # ledger records it too. Attribute to the submitter,
+                    # stamp the approving reviewer.
+                    s.add(FeedbackPair(
+                        signal="correction",
+                        question=it.question,
+                        good_answer=answer_to_ingest,
+                        # bad_answer must be the AI's first draft, not the
+                        # submitter's already-corrected text. it.answer is
+                        # `editedRemarks ?? remarks` from the frontend, so
+                        # it already reflects submitter edits; the pristine
+                        # first draft lives in it.original_answer.
+                        bad_answer=it.original_answer or it.answer or None,
+                        section=it.section or None,
+                        source="review_queue",
+                        user_email=sub.submitted_by,
+                        user_name=sub.submitted_by,
+                        reviewer_email=user.email,
+                        reviewer_name=user.name or user.email,
+                        confidence=float(it.confidence) if it.confidence is not None else None,
+                    ))
                 except Exception as e:
                     print(f"  [review] KB ingest failed for {it.question_id}: {e}")
         sub.status = "approved"
@@ -366,8 +419,18 @@ def export_submission(submission_id: str, user: User = Depends(current_user)):
         remarks = it.corrected_answer or it.answer or ""
         resp_map[_normalise_q(it.question)] = (avail, remarks)
 
-    # Walk data rows and write cells.
+    # Walk data rows and write cells. Two robustness concerns:
+    #   1. Cells inside a merged range are MergedCells — writing raises
+    #      AttributeError. A merge across the answer columns typically
+    #      means the row is a section-header banner (no answer belongs
+    #      there), so we skip it cleanly rather than 500ing the export.
+    #   2. Track which submission items didn't match any row so the caller
+    #      can surface silent drops (returned in X-Items-Skipped header).
+    from openpyxl.cell.cell import MergedCell
+
     injected = 0
+    merged_skips = 0
+    matched_keys: set[str] = set()
     start = (header_row or 1) + 1
     for row_idx in range(start, (ws.max_row or 0) + 1):
         v = ws.cell(row=row_idx, column=q_col).value
@@ -377,10 +440,27 @@ def export_submission(submission_id: str, user: User = Depends(current_user)):
         match = resp_map.get(key)
         if not match:
             continue
+        # If either target cell is inside a merged range, the row is a
+        # section-header banner in the template — skip rather than trying
+        # to unmerge (that would clobber the customer's layout).
+        a_cell = ws.cell(row=row_idx, column=a_col)
+        r_cell = ws.cell(row=row_idx, column=r_col)
+        if isinstance(a_cell, MergedCell) or isinstance(r_cell, MergedCell):
+            merged_skips += 1
+            continue
         avail, remarks = match
-        ws.cell(row=row_idx, column=a_col).value = avail
-        ws.cell(row=row_idx, column=r_col).value = remarks
+        a_cell.value = avail
+        r_cell.value = remarks
         injected += 1
+        matched_keys.add(key)
+
+    # Items whose question text didn't match any row on the sheet, either
+    # because of question-text drift or because they landed on merged
+    # section-header rows we skipped above.
+    skipped_ids = [
+        it.question_id for it in items
+        if _normalise_q(it.question) not in matched_keys
+    ]
 
     out = BytesIO()
     wb.save(out)
@@ -397,6 +477,8 @@ def export_submission(submission_id: str, user: User = Depends(current_user)):
             "Content-Disposition": f'attachment; filename="{filename}"',
             "X-Items-Total": str(len(items)),
             "X-Items-Written": str(injected),
+            "X-Items-Skipped": ",".join(skipped_ids) if skipped_ids else "",
+            "X-Rows-Skipped-Merged": str(merged_skips),
         },
     )
 
@@ -444,3 +526,90 @@ def mark_all_read(user: User = Depends(current_user)):
             n.read = True
         s.commit()
         return {"marked": len(rows)}
+
+
+# ── Dashboard stats (computed server-side, single source of truth) ────────────
+
+# Time-saved assumptions — EXPLICIT and adjustable. These are estimates, not
+# measured facts; keep them conservative and defensible.
+MANUAL_HOURS_PER_RFP = 16.0      # ~2 working days to fill an RFP by hand
+GENERATION_HOURS_PER_RFP = 0.25  # ~15 min for AI generation (tool cost, ex-review)
+WORKDAY_HOURS = 8.0
+
+
+def _median(xs: list[float]) -> float:
+    if not xs:
+        return 0.0
+    s = sorted(xs)
+    n = len(s)
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+@router.get("/dashboard-stats")
+def dashboard_stats(user: User = Depends(current_user)):
+    with Session(engine) as s:
+        subs = {x.id: x for x in s.exec(select(ReviewSubmission)).all()}
+        all_subs = list(subs.values())
+
+        # RFPs processed = every uploaded document (each upload event counts),
+        # including ones that were generated but never sent for review.
+        rfps_processed = len(s.exec(select(OriginalDocument)).all())
+
+        # A document is "in review" if the latest cycle in its lineage is pending.
+        # A document is "completed" if any cycle reached approved.
+        # Group submissions by doc_id, pick lineage state.
+        by_doc: dict[str, list[ReviewSubmission]] = {}
+        for x in all_subs:
+            by_doc.setdefault(x.doc_id, []).append(x)
+
+        in_review_docs = 0
+        completed_docs = 0
+        for doc_id, group in by_doc.items():
+            statuses = {g.status for g in group}
+            if "approved" in statuses:
+                completed_docs += 1
+            elif "pending" in statuses:
+                in_review_docs += 1
+
+        # Review turnaround: for each APPROVED submission, walk back to the first
+        # cycle in its lineage; turnaround = approved.reviewed_at - first.submitted_at.
+        # Use MEDIAN (robust to sheets left sitting for days).
+        turnarounds_min: list[float] = []
+        for a in all_subs:
+            if a.status != "approved" or not a.reviewed_at:
+                continue
+            first = a
+            seen = set()
+            while first.previous_submission_id and first.previous_submission_id in subs \
+                    and first.id not in seen:
+                seen.add(first.id)
+                first = subs[first.previous_submission_id]
+            if first.submitted_at:
+                delta_min = (a.reviewed_at - first.submitted_at).total_seconds() / 60.0
+                if delta_min >= 0:
+                    turnarounds_min.append(delta_min)
+        median_turnaround_min = _median(turnarounds_min)
+
+        # Time saved = completed RFPs * (manual - generation), in hours -> days.
+        hours_saved = completed_docs * (MANUAL_HOURS_PER_RFP - GENERATION_HOURS_PER_RFP)
+        days_saved = hours_saved / WORKDAY_HOURS
+
+        # Avg confidence across all items.
+        items = s.exec(select(ReviewItem)).all()
+        confs = [i.confidence for i in items if i.confidence and i.confidence > 0]
+        avg_confidence = sum(confs) / len(confs) if confs else 0.0
+
+        return {
+            "rfps_processed": rfps_processed,
+            "in_review": in_review_docs,
+            "completed": completed_docs,
+            "days_saved": round(days_saved, 1),
+            "hours_saved": round(hours_saved, 1),
+            "median_review_minutes": round(median_turnaround_min, 1),
+            "avg_confidence": round(avg_confidence, 3),
+            "assumptions": {
+                "manual_hours_per_rfp": MANUAL_HOURS_PER_RFP,
+                "generation_hours_per_rfp": GENERATION_HOURS_PER_RFP,
+            },
+        }

@@ -12,8 +12,12 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
   callbacks: {
     async signIn({ user, profile }) {
-      // Only allow @matters.ai accounts
       const email = (user?.email || profile?.email || '').toLowerCase()
+      // Local dev only: allow any Google account for multi-user testing.
+      // Production (NODE_ENV=production) always enforces the @matters.ai domain.
+      if (process.env.NODE_ENV === 'development' && process.env.ALLOW_ANY_GOOGLE === 'true') {
+        return true
+      }
       return email.endsWith('@matters.ai')
     },
 

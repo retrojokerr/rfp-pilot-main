@@ -99,7 +99,14 @@ export default function FeedbackPage() {
   const allPairs = useMemo(() => {
     const seen = new Set(pairs.map((p) => `${p.question}\u0000${p.goodAnswer}`))
     const remoteOnly = slackPairs.filter((p) => !seen.has(`${p.question}\u0000${p.goodAnswer}`))
-    return [...pairs, ...remoteOnly]
+    // Sort merged list by createdAt descending. Both API and Slack sources
+    // stamp ISO timestamps, so lexical descending == chronological newest
+    // first. Missing timestamps sort to the bottom — better than random.
+    return [...pairs, ...remoteOnly].sort((a, b) => {
+      const aTs = a.createdAt ?? ''
+      const bTs = b.createdAt ?? ''
+      return bTs.localeCompare(aTs)
+    })
   }, [pairs, slackPairs])
 
   const stats = useMemo(() => {

@@ -68,6 +68,11 @@ class FeedbackPair(SQLModel, table=True):
     source: Optional[str] = None   # slack | workspace | assistant | review_queue
     user_name: Optional[str] = None    # display name of who gave the feedback
     user_email: Optional[str] = None   # email of who gave the feedback
+    # When the correction came in via Review Queue approval, stamp the
+    # reviewer who approved it. Nullable — feedback from other sources
+    # (Slack, assistant, workspace direct) leaves these null.
+    reviewer_email: Optional[str] = None
+    reviewer_name: Optional[str] = None
     created_at: datetime = Field(default_factory=_now)
 
 
