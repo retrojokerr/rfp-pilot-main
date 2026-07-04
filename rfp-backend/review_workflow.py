@@ -236,6 +236,7 @@ def approve_submission(
                     it.flag_type = "corrected"
 
         ingested = 0
+        failed_ids: list[str] = []
         for it in items:
             answer_to_ingest = it.corrected_answer or (it.answer if it.flag_type == "corrected" else None)
             if it.flag_type in ("corrected", "flagged") and answer_to_ingest:
@@ -270,6 +271,21 @@ def approve_submission(
                     ))
                 except Exception as e:
                     print(f"  [review] KB ingest failed for {it.question_id}: {e}")
+                    failed_ids.append(it.question_id)
+        # Data-integrity gate: if any intended KB ingest failed, do NOT
+        # mark the sheet approved. Roll back so nothing (status, decisions,
+        # FeedbackPairs) is committed, and tell the reviewer to retry. This
+        # keeps approval and KB ingestion effectively atomic under Model A.
+        if failed_ids:
+            s.rollback()
+            raise HTTPException(
+                502,
+                detail={
+                    "message": "Knowledge-base ingestion failed for one or more "
+                               "answers; the sheet was NOT approved. Please retry.",
+                    "failed_question_ids": failed_ids,
+                },
+            )
         sub.status = "approved"
         sub.reviewed_by = user.email
         sub.reviewed_at = _now()
@@ -415,12 +431,28 @@ def export_submission(submission_id: str, user: User = Depends(current_user)):
             "The file may have been modified since submission.",
         )
 
-    # Build the lookup once.
-    resp_map: dict[str, tuple[str, str]] = {}
+    # Build collision-safe lookups. Answers are resolved per question_id
+    # (unique) — never by text alone — so duplicate/near-duplicate questions
+    # can't clobber one another.
+    #   * by_row: source_row -> (question_id, normalised question text). The
+    #     source_row is the 1-based openpyxl row the parser captured, unique
+    #     per item; the stored text lets us verify the row hasn't shifted.
+    #   * text_queue: normalised text -> queue of question_ids, the fallback
+    #     when a row shifted or an item has no source_row. Consuming from the
+    #     queue means duplicate questions each claim a distinct row.
+    from collections import defaultdict, deque
+
+    ans_by_id: dict[str, tuple[str, str]] = {}
+    by_row: dict[int, tuple[str, str]] = {}
+    text_queue: dict[str, "deque[str]"] = defaultdict(deque)
     for it in items:
         avail = it.availability or ""
         remarks = it.corrected_answer or it.answer or ""
-        resp_map[_normalise_q(it.question)] = (avail, remarks)
+        norm = _normalise_q(it.question)
+        ans_by_id[it.question_id] = (avail, remarks)
+        if it.source_row:
+            by_row[it.source_row] = (it.question_id, norm)
+        text_queue[norm].append(it.question_id)
 
     # Walk data rows and write cells. Two robustness concerns:
     #   1. Cells inside a merged range are MergedCells — writing raises
@@ -433,16 +465,32 @@ def export_submission(submission_id: str, user: User = Depends(current_user)):
 
     injected = 0
     merged_skips = 0
-    matched_keys: set[str] = set()
+    written_ids: set[str] = set()
     start = (header_row or 1) + 1
     for row_idx in range(start, (ws.max_row or 0) + 1):
         v = ws.cell(row=row_idx, column=q_col).value
         if v is None:
             continue
         key = _normalise_q(str(v))
-        match = resp_map.get(key)
-        if not match:
+
+        # Which item belongs on THIS row?
+        #   1. Positional: the item whose source_row == this row, if its stored
+        #      text still agrees (row hasn't shifted) and it's unclaimed.
+        #   2. Fallback: the next unclaimed item queued under this row's text.
+        qid = None
+        cand = by_row.get(row_idx)
+        if cand and cand[1] == key and cand[0] not in written_ids:
+            qid = cand[0]
+        if qid is None:
+            queue = text_queue.get(key)
+            while queue:
+                nxt = queue.popleft()
+                if nxt not in written_ids:
+                    qid = nxt
+                    break
+        if qid is None:
             continue
+
         # If either target cell is inside a merged range, the row is a
         # section-header banner in the template — skip rather than trying
         # to unmerge (that would clobber the customer's layout).
@@ -451,19 +499,16 @@ def export_submission(submission_id: str, user: User = Depends(current_user)):
         if isinstance(a_cell, MergedCell) or isinstance(r_cell, MergedCell):
             merged_skips += 1
             continue
-        avail, remarks = match
+
+        avail, remarks = ans_by_id[qid]
         a_cell.value = avail
         r_cell.value = remarks
         injected += 1
-        matched_keys.add(key)
+        written_ids.add(qid)
 
-    # Items whose question text didn't match any row on the sheet, either
-    # because of question-text drift or because they landed on merged
-    # section-header rows we skipped above.
-    skipped_ids = [
-        it.question_id for it in items
-        if _normalise_q(it.question) not in matched_keys
-    ]
+    # Items never written to a row: question text drifted / row removed, or
+    # they landed on a merged section-header row we skipped above.
+    skipped_ids = [it.question_id for it in items if it.question_id not in written_ids]
 
     out = BytesIO()
     wb.save(out)
