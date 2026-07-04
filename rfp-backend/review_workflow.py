@@ -157,12 +157,12 @@ def create_submission(payload: SubmissionIn, user: User = Depends(require("gener
                 corrected_answer=it.corrected_answer, flag_type=it.flag_type,
                 confidence=it.confidence, availability=it.availability,
             ))
-        from auth import list_users
-        reviewers = [u["email"] for u in list_users() if u["role"] in ("reviewer", "admin")]
-        for r_email in reviewers:
-            if r_email != user.email:
+        from auth import reviewer_emails
+        label = sub.display_name or payload.sheet_name
+        for r_email in reviewer_emails():
+            if r_email != user.email.lower():
                 _notify(s, r_email, "submission_received",
-                        f"{user.name or user.email} sent '{payload.sheet_name}' for review",
+                        f"{user.name or user.email} sent '{label}' for review",
                         f"/review-queue?submission={sub.id}")
         s.commit()
         s.refresh(sub)
@@ -273,9 +273,12 @@ def approve_submission(
         sub.status = "approved"
         sub.reviewed_by = user.email
         sub.reviewed_at = _now()
-        _notify(s, sub.submitted_by, "submission_approved",
-                f"Your sheet '{sub.sheet_name}' was approved",
-                f"/my-submissions?submission={sub.id}")
+        # Don't self-notify: an admin who approves their own submission
+        # shouldn't get an "approved" notification for it.
+        if sub.submitted_by != user.email:
+            _notify(s, sub.submitted_by, "submission_approved",
+                    f"Your sheet '{sub.display_name or sub.sheet_name}' was approved",
+                    f"/my-submissions?submission={sub.id}")
         s.commit()
         s.refresh(sub)
         return {"status": "approved", "ingested": ingested, "submission_id": sub.id}
@@ -310,7 +313,7 @@ def send_back_submission(submission_id: str, payload: SendBackIn, user: User = D
         sub.reviewed_at = _now()
         sub.reviewer_comment = payload.reviewer_comment
         _notify(s, sub.submitted_by, "submission_sent_back",
-                f"Your sheet '{sub.sheet_name}' was sent back with feedback",
+                f"Your sheet '{sub.display_name or sub.sheet_name}' was sent back with feedback",
                 f"/my-submissions?submission={sub.id}")
         s.commit()
         return {"status": "sent_back", "submission_id": sub.id}

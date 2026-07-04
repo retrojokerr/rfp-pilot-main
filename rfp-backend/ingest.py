@@ -31,6 +31,7 @@ embedder = SentenceTransformer("BAAI/bge-small-en-v1.5")
 qdrant = QdrantClient(
     url=os.getenv("QDRANT_URL", "http://localhost:6333"),
     api_key=os.getenv("QDRANT_API_KEY"),
+    timeout=30,  # seconds; default is short and unforgiving for hosted Qdrant
 )
 
 COLLECTION    = "rfi_knowledge_base"

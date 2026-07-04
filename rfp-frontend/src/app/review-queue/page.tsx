@@ -1,6 +1,7 @@
 'use client'
 
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import { useAutoRefresh } from '@/hooks/useAutoRefresh'
 import { motion } from 'framer-motion'
 import {
   CheckCircle2, XCircle, Clock, Search, FileText, Download,
@@ -57,18 +58,21 @@ export default function ReviewQueuePage() {
 
   useEffect(() => { setMounted(true) }, [])
 
+  // firstLoad gates the spinner + error toast to the initial mount only.
+  // Background refreshes (focus / interval) swap data in place silently.
+  const firstLoad = useRef(true)
   const refresh = useCallback(async () => {
-    setLoading(true)
     try {
       setSubmissions(await listSubmissions())
     } catch {
-      toast.error('Could not load submissions')
+      if (firstLoad.current) toast.error('Could not load submissions')
     } finally {
+      firstLoad.current = false
       setLoading(false)
     }
   }, [])
 
-  useEffect(() => { if (mounted) refresh() }, [mounted, refresh])
+  useAutoRefresh(refresh, { enabled: mounted })
 
   const stats = useMemo(() => ({
     pending:  submissions.filter(s => s.status === 'pending').length,

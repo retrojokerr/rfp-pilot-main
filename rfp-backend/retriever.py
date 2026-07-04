@@ -113,6 +113,24 @@ def retrieve(query: str, top_k: int = 5) -> list[dict]:
         except Exception:
             return default
 
+    def _qdrant_query(**kwargs):
+        """Run qdrant.query_points with a few retries. "Connection reset by
+        peer" and similar transient network errors (including a Cloud cluster
+        waking from idle) usually clear on a second attempt. Raises the last
+        exception if all attempts fail."""
+        import time as _time
+        last_exc = None
+        for attempt in range(3):
+            try:
+                return qdrant.query_points(**kwargs)
+            except Exception as e:  # noqa: BLE001 - retry any transport error
+                last_exc = e
+                if attempt < 2:
+                    _time.sleep(0.5 * (attempt + 1))  # 0.5s, then 1.0s
+                    print(f"  [retriever] Qdrant query retry "
+                          f"{attempt + 1}/2 after: {e}")
+        raise last_exc
+
     def _golden_label(payload):
         src = payload.get("correction_source") or "feedback"
         date = (payload.get("corrected_at") or payload.get("upload_date") or "")[:10]
@@ -121,7 +139,7 @@ def retrieve(query: str, top_k: int = 5) -> list[dict]:
     # ── TIER 1: human corrections ──────────────────────────────
     golden_chunks = []
     try:
-        golden_results = qdrant.query_points(
+        golden_results = _qdrant_query(
             collection_name=COLLECTION,
             query=query_vector,
             query_filter=Filter(
@@ -167,12 +185,19 @@ def retrieve(query: str, top_k: int = 5) -> list[dict]:
         print(f"  [retriever] Golden answer check failed: {e}")
 
     # ── TIER 2: knowledge-base documents ───────────────────────
-    results = qdrant.query_points(
-        collection_name=COLLECTION,
-        query=query_vector,
-        limit=top_k * 2,
-        with_payload=True,
-    ).points
+    # Wrapped in retry + graceful degradation: a transient Qdrant reset here
+    # must not 500 the whole /answer request. If it still fails after retries,
+    # fall back to whatever golden chunks we have (possibly empty).
+    try:
+        results = _qdrant_query(
+            collection_name=COLLECTION,
+            query=query_vector,
+            limit=top_k * 2,
+            with_payload=True,
+        ).points
+    except Exception as e:
+        print(f"  [retriever] Tier-2 document query failed after retries: {e}")
+        return golden_chunks[:top_k]
 
     doc_chunks = []
     for r in results:

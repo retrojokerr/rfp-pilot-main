@@ -135,6 +135,31 @@ def resolve_role(email: str) -> str:
     return default if default in ROLES else "readonly"
 
 
+def reviewer_emails() -> set[str]:
+    """Emails that should be notified as reviewers of a new submission.
+
+    Union of two sources, because roles come from two places:
+      (a) registered reviewer/admin rows in the users table, and
+      (b) ADMIN_EMAILS bootstrap admins (who never get a table row but do
+          resolve to "admin" at request time via resolve_role).
+
+    Without (b), a deployment whose only reviewer is an ADMIN_EMAILS admin
+    would never fire submission_received — the fan-out would iterate an
+    empty list. Lower-cased for consistent comparison.
+    """
+    registered = {
+        u["email"].lower()
+        for u in list_users()
+        if u["role"] in ("reviewer", "admin")
+    }
+    bootstrap = {
+        e.strip().lower()
+        for e in os.getenv("ADMIN_EMAILS", "").split(",")
+        if e.strip()
+    }
+    return registered | bootstrap
+
+
 # ── FastAPI dependencies ──────────────────────────────────────
 
 _bearer = HTTPBearer(auto_error=False)

@@ -1,6 +1,7 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useAutoRefresh } from '@/hooks/useAutoRefresh'
 
 import { motion } from 'framer-motion'
 import Link from 'next/link'
@@ -15,43 +16,37 @@ const ITEM = { hidden: { opacity: 0, y: 10 }, show: { opacity: 1, y: 0, transiti
 export default function DashboardPage() {
   // SHARED org-wide stats — same numbers for every user (backend-sourced).
   const [shared, setShared] = useState<{ vectors: number; documents: number; corrections: number } | null>(null)
-  useEffect(() => {
-    let alive = true
-    Promise.all([
-      fetchKnowledgeStats().catch(() => null),
-      fetchSharedFeedback().catch(() => [] as Awaited<ReturnType<typeof fetchSharedFeedback>>),
-    ]).then(([kb, fb]) => {
-      if (!alive) return
-      setShared({
-        vectors: kb?.vectorCount ?? 0,
-        documents: kb?.documentCount ?? 0,
-        corrections: fb.length,
-      })
-    })
-    return () => { alive = false }
-  }, [])
 
   // Submissions — the source of truth for team-wide dashboard counters.
   // Fetch once on mount; refetch happens implicitly when the user navigates
   // away and back (component re-mounts).
   const [subs, setSubs] = useState<ReviewSubmission[]>([])
-  useEffect(() => {
-    let alive = true
-    listSubmissions()
-      .then((s) => { if (alive) setSubs(s) })
-      .catch(() => { /* keep empty; UI renders "no submissions yet" */ })
-    return () => { alive = false }
-  }, [])
 
   // Server-computed dashboard metrics (single source of truth).
   const [dstats, setDstats] = useState<DashboardStats | null>(null)
-  useEffect(() => {
-    let alive = true
+  // All dashboard data, refreshed on mount + tab focus + short interval.
+  const refresh = useCallback(() => {
+    Promise.all([
+      fetchKnowledgeStats().catch(() => null),
+      fetchSharedFeedback().catch(() => [] as Awaited<ReturnType<typeof fetchSharedFeedback>>),
+    ]).then(([kb, fb]) => {
+      setShared({
+        vectors: kb?.vectorCount ?? 0,
+        documents: kb?.documentCount ?? 0,
+        corrections: fb.length,
+      })
+    }).catch(() => { /* leave prior stats on error */ })
+
+    listSubmissions()
+      .then(setSubs)
+      .catch(() => { /* keep prior; UI shows "no submissions yet" if empty */ })
+
     fetchDashboardStats()
-      .then((d) => { if (alive) setDstats(d) })
+      .then(setDstats)
       .catch(() => { /* tiles fall back to placeholders */ })
-    return () => { alive = false }
   }, [])
+
+  useAutoRefresh(refresh)
 
   // Format a duration in minutes into a human unit.
   const fmtDuration = (min: number): string => {

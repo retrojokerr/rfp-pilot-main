@@ -9,10 +9,12 @@ import {
   History, Zap, ChevronRight, Moon, Sun, Menu, X,
   MessageSquare, ClipboardCheck, LogOut, GitBranch, FileText} from 'lucide-react'
 import { useTheme } from 'next-themes'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { cn } from '@/utils/helpers'
 import { useReviewStore, setReviewActor } from '@/stores/reviewStore'
 import { listSubmissions } from '@/services/api'
+import NotificationBell from '@/components/layout/NotificationBell'
+import { useAutoRefresh } from '@/hooks/useAutoRefresh'
 import { useSessionStore } from '@/stores/sessionStore'
 import { canAccessRoute, homeRouteFor } from '@/utils/access'
 import { BrandLogo } from '@/components/layout/BrandLogo'
@@ -92,14 +94,20 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   // No `me` guard — with AUTH_DISABLED backend accepts unauthed reads, and
   // in prod the axios 401-retry-with-token handles auth. .catch() below
   // swallows any residual auth failure and just leaves the badge as-is.
-  useEffect(() => {
+  const refreshBadge = useCallback(() => {
     listSubmissions()
       .then((subs) => {
         const pending = subs.filter((s) => s.status === 'pending').length
-        setPendingSubmissionCount(pending)
+        // Only trigger a re-render when the count actually changes. Setting
+        // state to the same value every 15s would re-render AppLayout and
+        // make <motion.main> replay its entrance animation + remount the
+        // page, which resets child loading state (the 15s flash bug).
+        setPendingSubmissionCount((prev) => (prev === pending ? prev : pending))
       })
       .catch(() => { /* badge stays as-is on error */ })
-  }, [pathname])
+  }, [])
+  useAutoRefresh(refreshBadge)
+  useEffect(() => { refreshBadge() }, [pathname, refreshBadge])
 
   useEffect(() => { setMounted(true) }, [])
 
@@ -175,6 +183,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
               <div className="text-xs font-medium text-foreground truncate">{session?.user?.name ?? 'User'}</div>
               <div className="text-[10px] text-muted-foreground truncate">{session?.user?.email ?? ''}</div>
             </div>
+            <NotificationBell />
             <button onClick={() => signOut({ callbackUrl: '/login' })}
               className="p-1 rounded text-muted-foreground hover:text-foreground transition-colors" title="Sign out">
               <LogOut className="w-3.5 h-3.5" />

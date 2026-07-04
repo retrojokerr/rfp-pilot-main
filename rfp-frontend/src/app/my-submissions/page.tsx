@@ -1,6 +1,7 @@
 'use client'
 
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import { useAutoRefresh } from '@/hooks/useAutoRefresh'
 import { motion } from 'framer-motion'
 import {
   FileText, Clock, CheckCircle2, RotateCcw, ChevronRight, ArrowLeft,
@@ -67,21 +68,23 @@ export default function MySubmissionsPage() {
 
   useEffect(() => { setMounted(true) }, [])
 
+  // firstLoad gates the spinner + error toast to the initial mount only.
+  // Background refreshes (focus / interval) swap data in place silently.
+  const firstLoad = useRef(true)
   const refresh = useCallback(async () => {
-    setLoading(true)
     try {
       // listSubmissions returns only the caller's own when they aren't a reviewer;
-      // reviewers see all, so we also filter client-side by nothing here — the
-      // page is "my submissions", backend already scopes for non-reviewers.
+      // the backend already scopes for non-reviewers, so no client-side filter.
       setSubmissions(await listSubmissions())
     } catch {
-      toast.error('Could not load your submissions')
+      if (firstLoad.current) toast.error('Could not load your submissions')
     } finally {
+      firstLoad.current = false
       setLoading(false)
     }
   }, [])
 
-  useEffect(() => { if (mounted) refresh() }, [mounted, refresh])
+  useAutoRefresh(refresh, { enabled: mounted })
 
   if (!mounted) return null
 
