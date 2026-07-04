@@ -27,7 +27,6 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 # Magic bytes for real content-type detection (no system library needed)
 _XLSX_MAGIC = b"PK\x03\x04"          # ZIP archive (xlsx is a zip)
 _XLS_MAGIC  = b"\xd0\xcf\x11\xe0"    # OLE2 compound document
-_CSV_CHARS  = set(b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789,;|\t\r\n \"'-_.:/()&+@#$ ")
 
 def _validate_upload(filename: str, content: bytes) -> None:
     if len(content) > MAX_UPLOAD_BYTES:
@@ -49,8 +48,22 @@ def _validate_upload(filename: str, content: bytes) -> None:
             raise HTTPException(400, "File content is not a valid .xls spreadsheet")
     elif ext == ".csv":
         sample = content[:1024]
-        if not all(b in _CSV_CHARS for b in sample):
+        # Null bytes mean binary, not text — reject outright.
+        if b"\x00" in sample:
             raise HTTPException(400, "File does not appear to be valid CSV text")
+        # Strip a leading UTF-8 BOM (common in Excel-exported CSVs).
+        if sample.startswith(b"\xef\xbb\xbf"):
+            sample = sample[3:]
+        # Require UTF-8-decodable text. The 1024-byte cut may split a multibyte
+        # character, so trim up to 3 trailing bytes and retry before rejecting.
+        for trim in range(4):
+            candidate = sample[: len(sample) - trim] if trim else sample
+            try:
+                candidate.decode("utf-8")
+                break
+            except UnicodeDecodeError:
+                if trim == 3:
+                    raise HTTPException(400, "File does not appear to be valid UTF-8 CSV text")
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
