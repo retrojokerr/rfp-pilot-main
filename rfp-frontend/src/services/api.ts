@@ -500,3 +500,15 @@ export async function fetchDashboardStats(): Promise<DashboardStats> {
   const { data } = await api.get('/review/dashboard-stats')
   return data
 }
+
+// ── LLM model info (observability; masked key only) ──────────
+export interface ModelInfo {
+  provider: string
+  model: string
+  masked_key: string
+}
+
+export async function fetchModelInfo(): Promise<ModelInfo> {
+  const { data } = await api.get('/system/model-info')
+  return data
+}

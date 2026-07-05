@@ -170,6 +170,18 @@ def health():
     return {"status": "ok", "version": app.version}
 
 
+@app.get("/system/model-info")
+def model_info(user: "User" = Depends(current_user)):
+    """Resolved LLM provider/model + masked key, for the Settings UI. Auth-only;
+    the raw key never leaves the backend (masked_key redacts it)."""
+    from llm_provider import CONFIG
+    return {
+        "provider": CONFIG.provider,
+        "model": CONFIG.model,
+        "masked_key": CONFIG.masked_key(),
+    }
+
+
 # ── RFI history (org-wide, server-side) ──────────────────────
 # Replaces per-browser localStorage history: every user with access sees
 # the same ledger of processed RFIs. JSON-file storage (swap for a DB

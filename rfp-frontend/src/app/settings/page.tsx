@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import { fetchModelInfo, type ModelInfo } from '@/services/api'
 import { motion } from 'framer-motion'
 import { Save, TestTube, CheckCircle2, XCircle, Eye, EyeOff } from 'lucide-react'
 import { toast } from 'sonner'
@@ -16,6 +17,8 @@ export default function SettingsPage() {
   const [maxBatch, setMaxBatch] = useState(20)
   const [apiStatus, setApiStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle')
   const [vectors, setVectors] = useState<number | null>(null)
+  const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null)
+  useEffect(() => { fetchModelInfo().then(setModelInfo).catch(() => {}) }, [])
 
   // Load persisted settings on mount — previously this page showed
   // hardcoded defaults and "Save" was a no-op toast.
@@ -106,6 +109,18 @@ export default function SettingsPage() {
               Cannot reach API — make sure uvicorn is running
             </p>
           )}
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground">AI Model (server-side)</label>
+          <div className="px-3 py-2 text-sm bg-muted/40 border border-border rounded-lg font-mono">
+            {modelInfo
+              ? `${modelInfo.model}  ·  ${modelInfo.provider}  ·  ${modelInfo.masked_key}`
+              : '—'}
+          </div>
+          <p className="text-[10px] text-muted-foreground">
+            The model this instance is running, resolved from backend config.
+          </p>
         </div>
 
         <div className="space-y-1.5">
