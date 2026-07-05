@@ -248,7 +248,6 @@ def handle_mention(event, say, client):
     say(text=":mag: Searching knowledge base...", thread_ts=event["ts"])
 
     try:
-        result["query"] = query
         result   = ask(query)
         result["query"] = query
         fallback, blocks = format_response(result)
@@ -292,7 +291,7 @@ def handle_dm(event, say, client):
             })
 
             # Ingest correction directly into Qdrant for immediate improvement
-            api_url = os.getenv("API_URL", "http://localhost:8000")
+            api_url = os.getenv("API_URL", "http://backend:8000")
             try:
                 resp = httpx.post(
                     f"{api_url}/feedback/ingest",
