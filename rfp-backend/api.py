@@ -360,7 +360,7 @@ def sync_status():
 
 # ── Identity & user management ───────────────────────────────
 
-@app.get("/auth/check-access")
+@app.get("/access-check")
 def check_access(email: str):
     """Unauthenticated allowlist check, used by the frontend signIn callback
     to deny non-allowlisted users BEFORE a session is created. Returns only

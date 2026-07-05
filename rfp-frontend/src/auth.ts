@@ -27,7 +27,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       // unverified user through. Denied users land on /login?error=AccessDenied.
       try {
         const res = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL}/auth/check-access?email=${encodeURIComponent(email)}`,
+          `${process.env.NEXT_PUBLIC_API_URL}/access-check?email=${encodeURIComponent(email)}`,
           { cache: 'no-store' },
         )
         if (!res.ok) return false
