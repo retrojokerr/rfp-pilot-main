@@ -76,7 +76,7 @@ from fastapi import Depends
 from database import create_db_and_tables, engine
 from sqlmodel import Session
 from models import OriginalDocument
-from auth import require, current_user, User, list_users, upsert_user, delete_user, ROLES
+from auth import require, current_user, User, list_users, upsert_user, delete_user, ROLES, is_email_allowed
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -360,6 +360,14 @@ def sync_status():
 
 # ── Identity & user management ───────────────────────────────
 
+@app.get("/auth/check-access")
+def check_access(email: str):
+    """Unauthenticated allowlist check, used by the frontend signIn callback
+    to deny non-allowlisted users BEFORE a session is created. Returns only
+    a boolean — no role or PII — so it's safe to expose pre-auth."""
+    return {"allowed": is_email_allowed((email or "").strip().lower())}
+
+
 @app.get("/me")
 def me(user: User = Depends(current_user)):
     """Who am I and what can I do — drives all frontend gating."""
@@ -388,8 +396,15 @@ def admin_upsert_user(body: UserUpsert, user: User = Depends(require("manage_use
 
 @app.delete("/admin/users/{email}")
 def admin_delete_user(email: str, user: User = Depends(require("manage_users"))):
-    if email.strip().lower() == user.email:
+    target = email.strip().lower()
+    if target == user.email:
         raise HTTPException(400, "You cannot remove your own account")
+    # ADMIN_EMAILS bootstrap admins are the un-lockable safety net: deleting
+    # them from the registry wouldn't revoke access anyway (they re-resolve
+    # to admin via the env var), so block it to avoid confusing behaviour.
+    from auth import _admin_emails
+    if target in _admin_emails():
+        raise HTTPException(400, "This is a bootstrap admin (ADMIN_EMAILS) and cannot be removed here.")
     delete_user(email)
     return {"deleted": email}
 

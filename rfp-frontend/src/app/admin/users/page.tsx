@@ -73,7 +73,7 @@ export default function UsersAdminPage() {
   async function drop(email: string) {
     try {
       await removeUser(email)
-      toast.success(`${email} removed — they fall back to the default role`)
+      toast.success(`${email} removed — they can no longer sign in`)
       refresh()
     } catch (err) {
       toast.error('Could not remove user', { description: parseApiError(err) })
@@ -144,8 +144,8 @@ export default function UsersAdminPage() {
           </button>
         </div>
         <p className="text-2xs text-muted-foreground mt-2">
-          Anyone who signs in without an entry here gets the default role (read-only).
-          Bootstrap admins are set via the ADMIN_EMAILS environment variable.
+          Only people listed here (or bootstrap admins set via the ADMIN_EMAILS
+          environment variable) can sign in. Anyone else is denied access.
         </p>
       </div>
 
@@ -159,7 +159,7 @@ export default function UsersAdminPage() {
         )}
         {!loading && users.length === 0 && (
           <p className="p-6 text-center text-sm text-muted-foreground">
-            No explicit users yet — everyone is on the default role.
+            No users added yet — only ADMIN_EMAILS bootstrap admins can sign in.
           </p>
         )}
         {users.map((u, i) => (

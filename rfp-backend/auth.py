@@ -32,6 +32,7 @@ import os
 import json
 import threading
 from datetime import datetime, timezone
+from typing import Optional
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -121,18 +122,32 @@ def delete_user(email: str) -> None:
             s.commit()
 
 
-def resolve_role(email: str) -> str:
-    """Role precedence: explicit registry entry > ADMIN_EMAILS bootstrap > DEFAULT_ROLE."""
+def _admin_emails() -> set[str]:
+    return {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()}
+
+
+def resolve_role(email: str) -> Optional[str]:
+    """Resolve a role for an authenticated email, or None if not allowed.
+
+    Closed allowlist (Model 1): a user is allowed only if they have an
+    explicit registry row OR are an ADMIN_EMAILS bootstrap admin. There is
+    NO DEFAULT_ROLE fallback — an unknown email returns None (denied). This
+    is what makes the allowlist actually closed; without it, any
+    authenticated Google account would silently get a default role.
+    """
     email = email.lower()
     with Session(engine) as s:
         row = s.get(UserRow, email)
         if row:
             return row.role
-    admin_emails = {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()}
-    if email in admin_emails:
+    if email in _admin_emails():
         return "admin"
-    default = os.getenv("DEFAULT_ROLE", "readonly")
-    return default if default in ROLES else "readonly"
+    return None
+
+
+def is_email_allowed(email: str) -> bool:
+    """True if the email may sign in (registry row or ADMIN_EMAILS bootstrap)."""
+    return resolve_role(email) is not None
 
 
 def reviewer_emails() -> set[str]:
@@ -195,7 +210,11 @@ def current_user(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) 
     if not email:
         raise HTTPException(401, "Token has no subject")
 
-    return User(email=email, name=payload.get("name") or email, role=resolve_role(email))
+    role = resolve_role(email)
+    if role is None:
+        # Closed allowlist: authenticated, but not granted access.
+        raise HTTPException(403, "Access not granted — contact your administrator.")
+    return User(email=email, name=payload.get("name") or email, role=role)
 
 
 def require(capability: str):
