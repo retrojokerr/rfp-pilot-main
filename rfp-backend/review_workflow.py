@@ -400,24 +400,29 @@ def export_submission(submission_id: str, user: User = Depends(current_user)):
 
     # Locate the three mapped columns by exact header text (case-sensitive to
     # avoid false positives; the frontend captures the header text verbatim).
+    # Anchor on the row: find the first row (within 1-8) that contains ALL
+    # THREE header texts together, then bind the columns from that row. This
+    # keeps header_row unambiguous (data starts at header_row + 1) and avoids
+    # binding to an arbitrary row when headers span multiple rows or a header
+    # word appears in an earlier title row.
     q_col = a_col = r_col = None
     header_row = None
     for row_idx in range(1, min(9, (ws.max_row or 0) + 1)):
+        row_q = row_a = row_r = None
         for col_idx in range(1, (ws.max_column or 0) + 1):
             v = ws.cell(row=row_idx, column=col_idx).value
             if v is None:
                 continue
             txt = str(v).strip()
-            if q_col is None and txt == sub.question_col_name:
-                q_col = col_idx
-                header_row = row_idx
-            if a_col is None and txt == sub.availability_col_name:
-                a_col = col_idx
-                header_row = row_idx
-            if r_col is None and txt == sub.remarks_col_name:
-                r_col = col_idx
-                header_row = row_idx
-        if q_col and a_col and r_col:
+            if row_q is None and txt == sub.question_col_name:
+                row_q = col_idx
+            if row_a is None and txt == sub.availability_col_name:
+                row_a = col_idx
+            if row_r is None and txt == sub.remarks_col_name:
+                row_r = col_idx
+        if row_q and row_a and row_r:
+            q_col, a_col, r_col = row_q, row_a, row_r
+            header_row = row_idx
             break
 
     missing = []
