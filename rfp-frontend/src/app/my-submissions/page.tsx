@@ -13,6 +13,7 @@ import {
   listSubmissions, getSubmission, createSubmission, downloadAnsweredSheet,
   type ReviewSubmission, type ReviewItem, type ReviewItemPayload,
 } from '@/services/api'
+import { useSessionStore } from '@/stores/sessionStore'
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string; icon: typeof Clock }> = {
   pending:   { label: 'In review', color: 'text-amber-600 dark:text-amber-400',   bg: 'bg-amber-50 dark:bg-amber-950/40',   icon: Clock },
@@ -71,18 +72,22 @@ export default function MySubmissionsPage() {
   // firstLoad gates the spinner + error toast to the initial mount only.
   // Background refreshes (focus / interval) swap data in place silently.
   const firstLoad = useRef(true)
+  // "My Submissions" = the caller's own only. The backend returns ALL
+  // submissions to reviewers/admins (correct for the Review Queue), so we
+  // filter to the current user here regardless of role. Non-reviewers are
+  // already backend-scoped, so the filter is a no-op for them.
+  const meEmail = useSessionStore((s) => s.me?.email)
   const refresh = useCallback(async () => {
     try {
-      // listSubmissions returns only the caller's own when they aren't a reviewer;
-      // the backend already scopes for non-reviewers, so no client-side filter.
-      setSubmissions(await listSubmissions())
+      const all = await listSubmissions()
+      setSubmissions(meEmail ? all.filter((s) => s.submitted_by === meEmail) : all)
     } catch {
       if (firstLoad.current) toast.error('Could not load your submissions')
     } finally {
       firstLoad.current = false
       setLoading(false)
     }
-  }, [])
+  }, [meEmail])
 
   useAutoRefresh(refresh, { enabled: mounted })
 
