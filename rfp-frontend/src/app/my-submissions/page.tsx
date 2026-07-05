@@ -292,7 +292,14 @@ function MySubmissionDetail({ id, readOnly = false, onBack }: { id: string; read
             <button
               onClick={async () => {
                 try {
-                  await downloadAnsweredSheet(sub.id, sub.display_name || sub.sheet_name)
+                  const s = await downloadAnsweredSheet(sub.id, sub.display_name || sub.sheet_name)
+                  if (s.skipped > 0) {
+                    toast.warning(
+                      `Downloaded, but ${s.skipped} answer(s) couldn't be placed — the question text may have changed since submission.`,
+                    )
+                  } else {
+                    toast.success('Answered sheet downloaded')
+                  }
                 } catch (e: any) {
                   toast.error(e?.message || 'Download failed')
                 }

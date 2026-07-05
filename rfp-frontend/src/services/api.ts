@@ -384,10 +384,16 @@ export async function uploadRawDocument(
 // falls back to a name derived from the submission's display/sheet name.
 // On error, tries to unpack the JSON detail out of the error blob so the
 // caller can surface a useful toast instead of "Request failed".
+export interface ExportSummary {
+  written: number
+  skipped: number        // answers that could not be placed into the sheet
+  mergedSkipped: number  // rows skipped because they are merged section banners
+}
+
 export async function downloadAnsweredSheet(
   submissionId: string,
   fallbackName?: string,
-): Promise<void> {
+): Promise<ExportSummary> {
   try {
     const res = await api.get(`/review/submissions/${submissionId}/export`, {
       responseType: 'blob',
@@ -404,6 +410,12 @@ export async function downloadAnsweredSheet(
     a.click()
     document.body.removeChild(a)
     URL.revokeObjectURL(url)
+
+    const written = parseInt(res.headers['x-items-written'] || '0', 10) || 0
+    const skippedRaw = (res.headers['x-items-skipped'] || '').trim()
+    const skipped = skippedRaw ? skippedRaw.split(',').filter(Boolean).length : 0
+    const mergedSkipped = parseInt(res.headers['x-rows-skipped-merged'] || '0', 10) || 0
+    return { written, skipped, mergedSkipped }
   } catch (err: any) {
     // With responseType: 'blob', axios wraps error bodies as Blobs too.
     // Try to pull out {"detail": "..."} for a useful message.
